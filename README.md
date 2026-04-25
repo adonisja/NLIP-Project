@@ -1,5 +1,23 @@
 # Angel Filter
 
+## Contributing
+
+All changes go through pull requests — no direct commits to `main`, including from project owners.
+
+1. Create a branch from `main`:
+   ```bash
+   git checkout main && git pull origin main
+   git checkout -b your-name/short-description
+   ```
+2. Make your changes, commit, and push:
+   ```bash
+   git push -u origin your-name/short-description
+   ```
+3. Open a pull request on GitHub targeting `main`. Add a brief description of what changed and why.
+4. Get at least one teammate review before merging.
+
+---
+
 A local proxy agent that queries multiple AI / search providers, ranks their
 responses against what the user actually cares about, and penalizes sponsored
 content. Uses the [NLIP protocol](https://github.com/nlip-project) for
