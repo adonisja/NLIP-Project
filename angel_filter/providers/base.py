@@ -1,0 +1,60 @@
+"""Base contract for all provider adapters.
+
+Every provider (Google, Bing/Copilot, DuckDuckGo, Anthropic free-tier, etc.)
+must implement the same async `query()` method so the proxy can fan out to
+all of them in parallel and normalize their responses.
+"""
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class ProviderResult:
+    """A single normalized result from any provider.
+
+    All providers must squash their native response format into this shape so
+    the ranker sees a consistent interface. If a field is not available from a
+    given provider, leave it empty/None — do not fabricate.
+    """
+
+    title: str
+    snippet: str
+    url: str | None = None
+    provider: str = ""                       # "google", "bing", "duckduckgo"...
+    rank_in_provider: int = 0                # where this appeared in the provider's own list
+    price: float | None = None               # for shopping / flight results
+    sponsored: bool | None = None            # True if the provider flagged it as an ad
+    raw: dict[str, Any] = field(default_factory=dict)  # the untouched original payload
+
+
+class BaseProvider(ABC):
+    """Abstract base class for provider adapters.
+
+    Implementors should:
+      - set `name` to a short lowercase identifier ("google", "bing", ...)
+      - implement `query()` as a non-blocking coroutine
+      - normalize everything into ProviderResult instances
+      - raise ProviderError (below) on unrecoverable failures; the proxy will
+        log and continue with other providers' results
+    """
+
+    name: str = "base"
+
+    @abstractmethod
+    async def query(self, user_query: str, max_results: int = 10) -> list[ProviderResult]:
+        """Submit a query and return normalized results.
+
+        Args:
+            user_query: the raw text the user typed.
+            max_results: soft cap on how many results to return.
+
+        Returns:
+            A list of ProviderResult, ordered as the provider returned them.
+        """
+        raise NotImplementedError
+
+
+class ProviderError(Exception):
+    """Raised when a provider call fails in a way the proxy should log + skip."""

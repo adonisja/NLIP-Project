@@ -1,0 +1,34 @@
+[tool.poetry]
+name = "angel_filter"
+version = "0.1.0"
+description = "A local proxy agent that re-ranks multi-provider AI/search responses against user preferences using a local LLM."
+authors = ["CUNY Capstone Team"]
+license = "Apache-2.0"
+readme = "README.md"
+packages = [{ include = "angel_filter" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.30.0" }
+httpx = "^0.27.0"
+pydantic = "^2.8.0"
+ollama = "^0.3.0"
+python-dotenv = "^1.0.1"
+prometheus-client = "^0.20.0"
+
+# NLIP libraries per Mentor D
+nlip-sdk = { git = "https://github.com/nlip-project/nlip_sdk.git", branch = "main" }
+nlip-server = { git = "https://github.com/nlip-project/nlip_server.git", branch = "main" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
