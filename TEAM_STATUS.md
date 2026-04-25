@@ -1,6 +1,5 @@
 # Angel Filter — Team Status Report
-**Date:** April 24, 2026  
-**Author:** Akkeem (SWE Lead)  
+**Date:** April 24, 2026   
 **Next milestone:** May 1 — integrated demo (Dinesh returns)
 
 ---
