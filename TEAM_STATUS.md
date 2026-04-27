@@ -1,5 +1,5 @@
 # Angel Filter : Team Status Report
-**Date:** April 24, 2026   
+**Date:** April 27, 2026   
 **Next milestone:** May 1 : integrated demo (Dinesh returns)
 
 ---
@@ -43,11 +43,17 @@ The FastAPI server is standing and handles the full pipeline end-to-end.
 
 ### Observability ✅ Complete
 
-- **`GET /docs`**  Swagger UI, auto-generated from route definitions. Use this to explore and test the API interactively.
-- **`GET /metrics`**  Prometheus-format metrics endpoint, tracking:
-  - `angel_filter_queries_total` : success/error counts
-  - `angel_filter_query_duration_seconds` : per-request latency histogram
-  - `angel_filter_sponsored_penalties_total` : how many results were penalized (good demo talking point)
+- **`GET /health`** — returns `ok`, `mode` (nlip or fallback), `nlip_available`, `uptime_seconds`, and the list of active `providers`. Wired on both the NLIP path and the fallback path via a shared `_health_response()` helper in `server.py`.
+- **`GET /docs`** — Swagger UI, auto-generated from route definitions. Use this to explore and test the API interactively.
+- **`GET /metrics`** — Prometheus-format metrics endpoint, tracking:
+  - `angel_filter_queries_total` — success/error counts (labelled by status)
+  - `angel_filter_query_duration_seconds` — per-request latency histogram
+  - `angel_filter_sponsored_penalties_total` — how many results were penalized (good demo talking point)
+  - `angel_filter_start_timestamp_seconds` — server start Unix timestamp (subtract from `now()` in Grafana to get uptime)
+
+### Git Workflow ✅ Enforced
+
+All changes go through pull requests — no direct commits to `main`, including from project owners. See the Contributing section at the top of `README.md` for the branch + PR workflow.
 
 ### Tests ✅ 3/3 Passing
 
@@ -228,7 +234,10 @@ Hit `http://localhost:8000/docs` to explore the full API interactively before de
 | DuckDuckGo provider end-to-end | ✅ Done |
 | Local LLM ranking from mock data | ✅ Done : Ollama + nomic-embed-text live |
 | Sponsored penalty | ✅ Done : `SPONSORED_PENALTY = 0.15` |
-| Prometheus + Swagger observability | ✅ Done |
+| `/health` endpoint (uptime + provider list, both server paths) | ✅ Done |
+| Prometheus metrics (queries, latency, sponsored hits, start timestamp) | ✅ Done |
+| Swagger UI (`/docs`) | ✅ Done |
+| Branch + PR workflow documented in README | ✅ Done |
 | 3 passing tests | ✅ Done |
 | Google provider | ❌ Not started : Teammate J |
 | Bing/Copilot provider | ❌ Not started : Teammate J |

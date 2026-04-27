@@ -26,18 +26,21 @@ user queries never leave the machine.
 
 > CUNY capstone project — target demo May 1, final demo May 15.
 
-## Status (as of this scaffold)
+## Status (as of April 27, 2026)
 
 | Component | State | Owner |
 |---|---|---|
-| NLIP server skeleton (`NLIPApplication` / `NLIPSession`) | Wired, pending `poetry install` on a real machine | SWE team |
+| NLIP server (`NLIPApplication` / `NLIPSession`) | **Working** | SWE team |
 | FastAPI fallback server (runs without NLIP) | **Working** | — |
 | Provider adapter: DuckDuckGo | **Working** (no API key needed) | — |
 | Provider adapter: Mock (canned data for demos) | **Working** | — |
-| Provider adapter: Google | Not started — next task | SWE team |
-| Provider adapter: Bing / Copilot | Not started — next task | SWE team |
+| Provider adapter: Google | Not started | Teammate J |
+| Provider adapter: Bing / Copilot | Not started | Teammate J |
 | Orchestrator (parallel fan-out, failure isolation) | **Working** | — |
 | Ranker (Ollama embeddings + sponsored penalty) | **Working**, with keyword-overlap fallback when Ollama is offline | — |
+| `GET /health` (uptime + provider list) | **Working** | — |
+| `GET /metrics` (Prometheus) | **Working** | — |
+| `GET /docs` (Swagger UI) | **Working** | — |
 | Static demo frontend | **Working** (`static/index.html`) | UX teammate to redesign |
 | Tests | 3 passing (`tests/test_orchestrator.py`) | — |
 
@@ -143,24 +146,17 @@ Three tests live in `tests/test_orchestrator.py`:
 None of the tests require network or Ollama — they use the mock provider and
 the keyword-fallback ranker, making them fast and deterministic.
 
-## What to build next (after Friday)
+## What to build next
 
-Ordered roughly by priority for the May 1 integration milestone:
+Ordered by priority for the May 1 integration milestone:
 
-1. **Real Google adapter.** Either via their Custom Search API (paid past
-   the free quota) or via scraping. Model it on `providers/duckduckgo.py`.
-2. **Real Bing / Microsoft Copilot adapter.** Same shape; the provider
-   registry in `server.py` just needs one more entry.
-3. **Clarifying-question flow.** When the user doesn't supply a preference,
-   have the proxy ask one question before ranking. Owned by the prompt
-   engineering sub-team — they write the prompt, SWEs wire it up.
-4. **Session state.** Right now every query is stateless. `NLIPSession` gives
-   us per-connection state for free — wire it up so clarifier answers stick.
-5. **Real UI.** The current `static/index.html` is a placeholder — UX owner
-   redesigns it using the results of usability testing.
-6. **Swap the sponsored-content detector from "the provider told us" to
-   real heuristics** once we have a real provider (keyword patterns, URL
-   inspection, position-on-page signals).
+1. **Real Google adapter** — model on `providers/duckduckgo.py`; needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` from env. Owner: Teammate J.
+2. **Real Bing / Copilot adapter** — same shape; one line added to `_build_orchestrator()`. Owner: Teammate J.
+3. **Swap mock data** — `mock.py` currently returns toilet paper products; swap canned results to match the demo vertical (flights or shopping) before May 1. Owner: Teammate J.
+4. **Clarifying-question flow** — prompt engineering sub-team writes the policy; SWEs wire session state in `NLIPSession`. Coordinate by May 4.
+5. **Session state** — `NLIPSession` already supports per-connection state; wire up so clarifier answers persist across turns.
+6. **UI redesign** — `static/index.html` is functional but a placeholder; UX owner (Teammate Ma) redesigns using the stable `/query` response schema.
+7. **Real sponsored-content detection** — the penalty is live; what's missing is reliable detection from real providers (URL patterns, position signals, keyword heuristics). Owner: Prompt Engineering.
 
 ## Project layout
 

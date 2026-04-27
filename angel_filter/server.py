@@ -22,7 +22,7 @@ import os
 import time
 
 from fastapi import FastAPI, Request, Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.providers import DuckDuckGoProvider, MockProvider
@@ -43,6 +43,12 @@ SPONSORED_PENALTY_COUNT = Counter(
     "angel_filter_sponsored_penalties_total",
     "Number of results that had the sponsored penalty applied",
 )
+UPTIME_GAUGE = Gauge(
+    "angel_filter_start_timestamp_seconds",
+    "Unix timestamp when the server process started",
+)
+_START_TIME = time.time()
+UPTIME_GAUGE.set(_START_TIME)
 
 
 # --- Build the orchestrator once at import time ---
@@ -58,6 +64,18 @@ def _build_orchestrator() -> Orchestrator:
 
 
 ORCHESTRATOR = _build_orchestrator()
+
+
+# --- Shared health helper -----------------------------------------------------
+
+def _health_response(mode: str, nlip_available: bool) -> dict:
+    return {
+        "ok": True,
+        "mode": mode,
+        "nlip_available": nlip_available,
+        "uptime_seconds": round(time.time() - _START_TIME, 1),
+        "providers": [p.name for p in ORCHESTRATOR.providers],
+    }
 
 
 # --- NLIP integration ---------------------------------------------------------
@@ -130,6 +148,10 @@ if _NLIP_AVAILABLE:
             return FileResponse(index_path)
         return {"msg": "Angel Filter — POST to /query or /nlip/"}
 
+    @app.get("/health")
+    async def health():
+        return _health_response(mode="nlip", nlip_available=True)
+
     @app.post("/query")
     async def query(body: QueryIn):
         with QUERY_LATENCY.time():
@@ -199,7 +221,7 @@ else:
 
     @app.get("/health")
     async def health():
-        return {"ok": True, "mode": "fallback", "nlip_available": False}
+        return _health_response(mode="fallback", nlip_available=False)
 
     @app.post("/query")
     async def query(body: QueryIn):
