@@ -21,11 +21,15 @@ import logging
 import os
 import time
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from angel_filter.orchestrator import Orchestrator
-from angel_filter.providers import DuckDuckGoProvider, MockProvider
+from angel_filter.providers import (
+    ClaudeProvider,
+    GeminiProvider,
+    OpenAIProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +56,13 @@ UPTIME_GAUGE.set(_START_TIME)
 
 
 # --- Build the orchestrator once at import time ---
-# The set of providers the proxy fans out to. MockProvider is kept in the
-# default list so the demo always returns something even if the network is
-# unreliable. Once Google/Bing adapters land, append them here.
+# The set of hosted AI providers the proxy fans out to. Model choices and
+# low-cost/free-tier presets live in providers/ai_models.py.
 def _build_orchestrator() -> Orchestrator:
     providers = [
-        DuckDuckGoProvider(),
-        MockProvider(),
+        ClaudeProvider(),
+        OpenAIProvider(),
+        GeminiProvider(),
     ]
     return Orchestrator(providers=providers)
 
@@ -128,10 +132,9 @@ if _NLIP_AVAILABLE:
 
     app = setup_server(AngelFilterApplication())
 
-    # Mount the demo UI routes onto the NLIP app so /query and / work for the
+    # Mount the local UI routes onto the NLIP app so /query and / work for the
     # frontend regardless of whether NLIP is the active transport.
     from fastapi.responses import FileResponse
-    from fastapi.staticfiles import StaticFiles
     from pathlib import Path
     from pydantic import BaseModel
 
@@ -190,11 +193,8 @@ if _NLIP_AVAILABLE:
 
 
 else:
-    # --- Fallback: plain FastAPI so the demo still runs without NLIP installed -
-    # This path exists so Friday's demo is not held hostage by a dependency
-    # install problem. It exposes a single POST /query endpoint that does the
-    # same thing the NLIP session would do. Remove once NLIP is reliably
-    # installable on every teammate's machine.
+    # --- Fallback: plain FastAPI so local development still works without NLIP.
+    # It exposes the same POST /query endpoint the NLIP session uses.
     from fastapi import FastAPI
     from fastapi.responses import FileResponse
     from pathlib import Path

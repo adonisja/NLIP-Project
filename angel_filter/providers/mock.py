@@ -1,7 +1,7 @@
 """Mock provider — returns canned results for deterministic testing.
 
-Use this when you want to demo the ranking logic without depending on live
-provider APIs, and in unit tests. Canned results are intentionally a mix of
+Use this when you want to test the ranking logic without depending on live
+provider APIs. Canned results are intentionally a mix of
 sponsored-looking and genuinely useful entries so the ranker has something
 meaningful to do.
 """
@@ -20,7 +20,7 @@ class MockProvider(BaseProvider):
 
 
 def _default_shopping_results() -> list[ProviderResult]:
-    """Toilet-paper-style demo set matching Instructor Z's example."""
+    """Small deterministic shopping set used by tests."""
     return [
         ProviderResult(
             title="SponsorCo Ultra-Plush 24-pack",

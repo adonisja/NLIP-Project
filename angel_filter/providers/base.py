@@ -1,6 +1,6 @@
 """Base contract for all provider adapters.
 
-Every provider (Google, Bing/Copilot, DuckDuckGo, Anthropic free-tier, etc.)
+Every provider (Claude, OpenAI, Gemini, DuckDuckGo, mock, etc.)
 must implement the same async `query()` method so the proxy can fan out to
 all of them in parallel and normalize their responses.
 """
@@ -22,7 +22,7 @@ class ProviderResult:
     title: str
     snippet: str
     url: str | None = None
-    provider: str = ""                       # "google", "bing", "duckduckgo"...
+    provider: str = ""                       # "claude", "openai", "gemini", "duckduckgo"...
     rank_in_provider: int = 0                # where this appeared in the provider's own list
     price: float | None = None               # for shopping / flight results
     sponsored: bool | None = None            # True if the provider flagged it as an ad
@@ -33,7 +33,7 @@ class BaseProvider(ABC):
     """Abstract base class for provider adapters.
 
     Implementors should:
-      - set `name` to a short lowercase identifier ("google", "bing", ...)
+      - set `name` to a short lowercase identifier ("claude", "openai", ...)
       - implement `query()` as a non-blocking coroutine
       - normalize everything into ProviderResult instances
       - raise ProviderError (below) on unrecoverable failures; the proxy will

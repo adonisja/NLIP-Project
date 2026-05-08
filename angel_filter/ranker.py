@@ -12,7 +12,7 @@ SPONSORED_PENALTY is the whole point of the project — it's why we're not just
 re-ranking by relevance, we're explicitly de-weighting ad content.
 
 If Ollama is unavailable (no model pulled, daemon not running) the ranker
-falls back to a keyword-overlap baseline so the demo still runs. The fallback
+falls back to a keyword-overlap baseline so local runs still work. The fallback
 is clearly marked in the response so it's never mistaken for the real thing.
 """
 

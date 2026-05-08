@@ -1,185 +1,157 @@
 # Angel Filter
 
-## Contributing
+A local proxy that asks multiple hosted AI models for answers, normalizes their
+responses, and returns the ranked results through the existing FastAPI/NLIP
+server.
 
-All changes go through pull requests — no direct commits to `main`, including from project owners.
+The current default fan-out calls:
 
-1. Create a branch from `main`:
-   ```bash
-   git checkout main && git pull origin main
-   git checkout -b your-name/short-description
-   ```
-2. Make your changes, commit, and push:
-   ```bash
-   git push -u origin your-name/short-description
-   ```
-3. Open a pull request on GitHub targeting `main`. Add a brief description of what changed and why.
-4. Get at least one teammate review before merging.
+- Claude
+- OpenAI
+- Gemini
 
----
+The project still keeps the orchestrator/ranker structure, so the API-provider
+setup is separate from any later judging or ranking changes.
 
-A local proxy agent that queries multiple AI / search providers, ranks their
-responses against what the user actually cares about, and penalizes sponsored
-content. Uses the [NLIP protocol](https://github.com/nlip-project) for
-communication and a local LLM via [Ollama](https://ollama.com) for ranking, so
-user queries never leave the machine.
+## How It Works
 
-> CUNY capstone project — target demo May 1, final demo May 15.
-
-## Status (as of April 27, 2026)
-
-| Component | State | Owner |
-|---|---|---|
-| NLIP server (`NLIPApplication` / `NLIPSession`) | **Working** | SWE team |
-| FastAPI fallback server (runs without NLIP) | **Working** | — |
-| Provider adapter: DuckDuckGo | **Working** (no API key needed) | — |
-| Provider adapter: Mock (canned data for demos) | **Working** | — |
-| Provider adapter: Google | Not started | Teammate J |
-| Provider adapter: Bing / Copilot | Not started | Teammate J |
-| Orchestrator (parallel fan-out, failure isolation) | **Working** | — |
-| Ranker (Ollama embeddings + sponsored penalty) | **Working**, with keyword-overlap fallback when Ollama is offline | — |
-| `GET /health` (uptime + provider list) | **Working** | — |
-| `GET /metrics` (Prometheus) | **Working** | — |
-| `GET /docs` (Swagger UI) | **Working** | — |
-| Static demo frontend | **Working** (`static/index.html`) | UX teammate to redesign |
-| Tests | 3 passing (`tests/test_orchestrator.py`) | — |
-
-"Working" means end-to-end tested locally against the mock provider and against the live DuckDuckGo API.
-
-## Architecture
-
+```text
+User question
+  -> server.py (/query or NLIP message)
+  -> Orchestrator
+  -> ClaudeProvider, OpenAIProvider, GeminiProvider
+  -> ProviderResult list
+  -> Ranker
+  -> JSON response / NLIP text response
 ```
-    user (browser)
-          │
-          │  POST /query  (or NLIP message once nlip_server is installed)
-          ▼
-    ┌──────────────────────────┐
-    │   FastAPI / NLIP server  │       angel_filter/server.py
-    └────────────┬─────────────┘
-                 │
-                 ▼
-    ┌──────────────────────────┐
-    │       Orchestrator       │       angel_filter/orchestrator.py
-    │   (fans out in parallel) │
-    └──────┬───────┬───────────┘
-           │       │
-     ┌─────▼──┐ ┌──▼────┐  ┌───────┐   angel_filter/providers/*.py
-     │ DDG    │ │ Mock  │  │ Google│   (more adapters plug in here)
-     └─────┬──┘ └──┬────┘  └───┬───┘
-           │       │           │
-           └───┬───┴───────────┘
-               │  normalized ProviderResult list
-               ▼
-    ┌──────────────────────────┐
-    │         Ranker           │       angel_filter/ranker.py
-    │  Ollama embeddings +     │
-    │  sponsored-content       │
-    │  penalty                 │
-    └────────────┬─────────────┘
-                 │  RankedResult list
-                 ▼
-             user sees
+
+Each AI provider returns one normalized result:
+
+```json
+{
+  "title": "Claude answer",
+  "snippet": "Model answer text...",
+  "url": null,
+  "provider": "claude",
+  "score": 0.82,
+  "rationale": "...",
+  "sponsored": false
+}
 ```
 
 ## Setup
 
-Prereqs: Python 3.10+, [Poetry](https://python-poetry.org/), and (optional but
-recommended) [Ollama](https://ollama.com) with a pulled embedding model.
+Prereqs: Python 3.10+, Poetry, and API keys for the model providers you want to
+call.
 
-```bash
-# 1. Clone the repo
-git clone <this-repo>
-cd angel_filter
-
-# 2. Install deps (includes the three NLIP libraries per Mentor D)
+```powershell
+cd C:\Users\pc\Desktop\NLPproject\NLIP-Project_ib
 poetry install
-
-# 3. (Optional) pull an embedding model for ranking
-ollama pull nomic-embed-text
-
-# 4. Run the server
-poetry run python -m angel_filter.server
-#    or, for auto-reload during development:
-poetry run fastapi dev angel_filter/server.py
 ```
 
-Then open <http://localhost:8000> in a browser.
+Set API keys in the same terminal that will run the server:
 
-### Running without Ollama
+```powershell
+$env:ANTHROPIC_API_KEY="..."
+$env:OPENAI_API_KEY="..."
+$env:GEMINI_API_KEY="..."
+```
 
-The ranker falls back to a keyword-overlap scorer and clearly tags each
-ranking explanation with `[keyword fallback]`. The demo still shows the
-sponsored-content penalty in action — just without the semantic muscle.
+Optional model overrides:
 
-### Running without the NLIP libraries installed
+```powershell
+$env:CLAUDE_MODEL="claude-sonnet-4-20250514"
+$env:OPENAI_MODEL="gpt-5.4-mini"
+$env:GEMINI_MODEL="gemini-2.5-flash"
+```
 
-If `poetry install` can't resolve the NLIP packages (they're Git-based and
-occasionally in flux), `server.py` detects the missing imports and exposes
-a plain FastAPI endpoint at `POST /query` that does the same pipeline work.
-The static frontend talks to this endpoint. See `docs/DEV_FALLBACK.md`.
+You can also use model presets instead of exact model names:
 
-## Using the three NLIP libraries
+```powershell
+$env:CLAUDE_MODEL_PRESET="fast"
+$env:OPENAI_MODEL_PRESET="low_cost"
+$env:GEMINI_MODEL_PRESET="fast_free_tier"
+```
 
-Per Mentor D's direction the project depends on:
+Run the server:
 
-- [`nlip_sdk`](https://github.com/nlip-project/nlip_sdk) — message format, factory helpers
-- [`nlip_server`](https://github.com/nlip-project/nlip_server) — `NLIPApplication`, `NLIPSession`, `start_server` (FastAPI-based)
-- [`nlip_web`](https://github.com/nlip-project/nlip_web) — reference implementation of a multi-store product search using the above; worth reading for patterns but not a dependency
+```powershell
+poetry run python -m angel_filter.server
+```
 
-Our server code lives in `angel_filter/server.py` and follows the echo.py
-pattern from `nlip_server`: subclass the two base classes, pass the app to
-`start_server`. When `nlip_sdk` and `nlip_server` are importable, the module
-uses them; when they aren't, it falls back to a plain FastAPI app.
+Then open:
 
-## Running the tests
+- <http://localhost:8000> for the simple UI
+- <http://localhost:8000/docs> for Swagger
+- <http://localhost:8000/health> for provider status
 
-```bash
+## Providers
+
+Hosted model API code lives in:
+
+```text
+angel_filter/providers/ai_models.py
+```
+
+That file contains:
+
+- `AIAnswerProvider`: shared API-key, HTTP POST, and normalization helper
+- `MODEL_OPTIONS`: model presets for Claude, OpenAI, and Gemini
+- `ClaudeProvider`: calls Anthropic Messages API
+- `OpenAIProvider`: calls OpenAI Responses API
+- `GeminiProvider`: calls Gemini `generateContent`
+
+Current presets:
+
+| Provider | Preset | Model |
+|---|---|---|
+| Claude | `default` | `claude-sonnet-4-20250514` |
+| Claude | `fast` | `claude-3-5-haiku-20241022` |
+| OpenAI | `default` | `gpt-5.4-mini` |
+| OpenAI | `low_cost` | `gpt-5-mini` |
+| OpenAI | `legacy_low_cost` | `gpt-4.1-mini` |
+| Gemini | `default` | `gemini-2.5-flash` |
+| Gemini | `free_tier` | `gemini-2.5-flash` |
+| Gemini | `fast_free_tier` | `gemini-2.5-flash-lite` |
+
+Offline/free utility providers live separately:
+
+- `DuckDuckGoProvider`: no-key search provider, not registered by default
+- `MockProvider`: deterministic local results for tests and offline runs
+
+If a key is missing or one API call fails, the orchestrator records that
+provider in `providers_failed` and still returns any successful provider
+answers.
+
+## Useful Files
+
+```text
+angel_filter/
+  server.py             # FastAPI/NLIP routes and provider registration
+  orchestrator.py       # parallel provider fan-out and failure isolation
+  ranker.py             # existing ranking layer
+  providers/
+    ai_models.py        # Claude/OpenAI/Gemini API calls
+    base.py             # provider interface and ProviderResult shape
+    duckduckgo.py       # free/no-key DuckDuckGo provider
+    mock.py             # test/offline provider
+static/
+  index.html            # simple local UI
+tests/
+  test_orchestrator.py  # existing orchestrator tests
+```
+
+## Tests
+
+```powershell
 poetry run pytest
 ```
 
-Three tests live in `tests/test_orchestrator.py`:
+The current tests use the mock provider and do not call live AI APIs.
 
-1. End-to-end pipeline returns ranked results.
-2. Sponsored items are penalized (do not end up #1).
-3. One failing provider does not break the pipeline for the others.
+## Notes
 
-None of the tests require network or Ollama — they use the mock provider and
-the keyword-fallback ranker, making them fast and deterministic.
-
-## What to build next
-
-Ordered by priority for the May 1 integration milestone:
-
-1. **Real Google adapter** — model on `providers/duckduckgo.py`; needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` from env. Owner: Teammate J.
-2. **Real Bing / Copilot adapter** — same shape; one line added to `_build_orchestrator()`. Owner: Teammate J.
-3. **Swap mock data** — `mock.py` currently returns toilet paper products; swap canned results to match the demo vertical (flights or shopping) before May 1. Owner: Teammate J.
-4. **Clarifying-question flow** — prompt engineering sub-team writes the policy; SWEs wire session state in `NLIPSession`. Coordinate by May 4.
-5. **Session state** — `NLIPSession` already supports per-connection state; wire up so clarifier answers persist across turns.
-6. **UI redesign** — `static/index.html` is functional but a placeholder; UX owner (Teammate Ma) redesigns using the stable `/query` response schema.
-7. **Real sponsored-content detection** — the penalty is live; what's missing is reliable detection from real providers (URL patterns, position signals, keyword heuristics). Owner: Prompt Engineering.
-
-## Project layout
-
-```
-angel_filter/
-  angel_filter/
-    __init__.py
-    server.py             # NLIP server + FastAPI fallback
-    orchestrator.py       # parallel fan-out + ranker call
-    ranker.py             # Ollama embeddings + sponsored penalty
-    providers/
-      __init__.py
-      base.py             # BaseProvider, ProviderResult, ProviderError
-      duckduckgo.py       # real provider, no API key required
-      mock.py             # canned data for offline demos and tests
-  static/
-    index.html            # demo UI
-  tests/
-    test_orchestrator.py
-  pyproject.toml
-  README.md
-```
-
-## License
-
-Apache-2.0 (matches the upstream NLIP projects).
+- API keys are read from environment variables only. Do not hardcode secrets.
+- The default server provider list is in `_build_orchestrator()` in
+  `angel_filter/server.py`.
+- Ollama/ranking behavior is intentionally separate from the provider API setup.
