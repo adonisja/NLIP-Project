@@ -59,8 +59,8 @@ def filter_query() -> tuple:
             ollama_model=ollama_model,
             ollama_url=ollama_url,
         )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 502
+    except Exception:
+        return jsonify({"error": "Upstream filtering failed"}), 502
 
     return jsonify(result), 200
 
