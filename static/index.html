@@ -79,16 +79,16 @@ form.addEventListener("submit", async (e) => {
 });
 
 function render(data) {
-  const used = (data.providers_used || []).join(", ") || "none";
-  const failed = (data.providers_failed || []).join(", ");
+  const used = (data.providers_used || []).map(escape).join(", ") || "none";
+  const failed = (data.providers_failed || []).map(escape).join(", ");
   let html = `<div class="meta">Providers used: ${used}${failed ? " · failed: " + failed : ""}</div>`;
   if (!data.results || data.results.length === 0) {
     html += `<div class="card">No results returned.</div>`;
   } else {
     data.results.forEach((r, i) => {
       const chips = [
-        `<span class="chip">score ${r.score}</span>`,
-        `<span class="chip">${r.provider}</span>`,
+        `<span class="chip">score ${escape(r.score)}</span>`,
+        `<span class="chip">${escape(r.provider)}</span>`,
         r.sponsored
           ? `<span class="chip sponsored">sponsored · penalized</span>`
           : `<span class="chip good">organic</span>`,
