@@ -49,7 +49,7 @@ def filter_query() -> tuple:
 
     gemini_model = str(payload.get("gemini_model", DEFAULT_GEMINI_MODEL)).strip() or DEFAULT_GEMINI_MODEL
     ollama_model = str(payload.get("ollama_model", DEFAULT_OLLAMA_MODEL)).strip() or DEFAULT_OLLAMA_MODEL
-    ollama_url = str(payload.get("ollama_url", DEFAULT_OLLAMA_URL)).strip() or DEFAULT_OLLAMA_URL
+    ollama_url = DEFAULT_OLLAMA_URL
 
     try:
         result = run_filter(
