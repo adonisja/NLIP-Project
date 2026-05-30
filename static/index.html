@@ -112,6 +112,9 @@ function escape(s) {
 }
 
 function safeHref(url) {
+  if (typeof url !== "string" || !url) {
+    return "";
+  }
   try {
     const parsed = new URL(url, window.location.href);
     return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
