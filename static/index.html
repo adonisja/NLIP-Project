@@ -72,15 +72,15 @@ form.addEventListener("submit", async (e) => {
     const data = await res.json();
     render(data);
   } catch (err) {
-    out.innerHTML = `<div class="card error">Request failed: ${err.message}</div>`;
+    out.innerHTML = `<div class="card error">Request failed: ${escape(err.message)}</div>`;
   } finally {
     btn.disabled = false;
   }
 });
 
 function render(data) {
-  const used = (data.providers_used || []).join(", ") || "none";
-  const failed = (data.providers_failed || []).join(", ");
+  const used = escape((data.providers_used || []).join(", ") || "none");
+  const failed = escape((data.providers_failed || []).join(", "));
   let html = `<div class="meta">Providers used: ${used}${failed ? " · failed: " + failed : ""}</div>`;
   if (!data.results || data.results.length === 0) {
     html += `<div class="card">No results returned.</div>`;
@@ -88,19 +88,20 @@ function render(data) {
     data.results.forEach((r, i) => {
       const chips = [
         `<span class="chip">score ${r.score}</span>`,
-        `<span class="chip">${r.provider}</span>`,
+        `<span class="chip">${escape(r.provider)}</span>`,
         r.sponsored
           ? `<span class="chip sponsored">sponsored · penalized</span>`
           : `<span class="chip good">organic</span>`,
       ].join("");
+      const href = safeHref(r.url);
       html += `
-        <div class="card">
-          <span class="rank">#${i + 1}</span><span class="title">${escape(r.title)}</span>
-          <div class="snippet">${escape(r.snippet || "")}</div>
-          ${r.url ? `<div class="snippet"><a href="${escape(r.url)}" target="_blank" rel="noopener">${escape(r.url)}</a></div>` : ""}
-          <div class="row">${chips}</div>
-          <div class="snippet"><em>${escape(r.rationale || "")}</em></div>
-        </div>`;
+      <div class="card">
+        <span class="rank">#${i + 1}</span><span class="title">${escape(r.title)}</span>
+        <div class="snippet">${escape(r.snippet || "")}</div>
+        ${href ? `<div class="snippet"><a href="${href}" target="_blank" rel="noopener">${escape(r.url)}</a></div>` : ""}
+        <div class="row">${chips}</div>
+        <div class="snippet"><em>${escape(r.rationale || "")}</em></div>
+      </div>`;
     });
   }
   out.innerHTML = html;
@@ -108,6 +109,15 @@ function render(data) {
 
 function escape(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function safeHref(url) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
 }
 </script>
 </body>
