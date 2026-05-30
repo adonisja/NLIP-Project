@@ -20,7 +20,6 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CONSENSUS_NAME_SIMILARITY = 0.82
 CONSENSUS_EMBEDDING_DISTANCE = 0.9
 REQUEST_TIMEOUT_SECONDS = 45
-DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
 def load_env_file(env_path: str = ".env") -> None:
@@ -37,6 +36,8 @@ def load_env_file(env_path: str = ".env") -> None:
 
 
 load_env_file()
+
+DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
 def discover_ollama_model(base_url: str) -> str:
