@@ -30,9 +30,13 @@
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .error { color: var(--warn); }
+  .logout { position: fixed; top: 16px; left: 16px; background: var(--card); color: var(--muted); border: 1px solid #2a3450; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .logout:hover { color: var(--ink); border-color: #3a4868; }
+  .logout:disabled { opacity: 0.5; cursor: wait; }
 </style>
 </head>
 <body>
+<button id="logout" class="logout" type="button">Log out</button>
 <main>
   <h1>Angel Filter</h1>
   <p class="sub">A proxy that asks several providers, ranks their answers against what <em>you</em> care about, and penalizes sponsored results.</p>
@@ -52,6 +56,19 @@
 const form = document.getElementById("f");
 const out = document.getElementById("out");
 const btn = document.getElementById("go");
+const logoutBtn = document.getElementById("logout");
+
+logoutBtn.addEventListener("click", async () => {
+  logoutBtn.disabled = true;
+  try {
+    await fetch("/logout", { method: "POST" });
+  } catch (_) {
+    // Even if the network call fails, send the user to /login —
+    // the session cookie is cleared client-side on the next navigation.
+  } finally {
+    location.href = "/login";
+  }
+});
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -68,6 +85,11 @@ form.addEventListener("submit", async (e) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query, preference }),
     });
+    if (res.status === 401) {
+      // Session expired or missing — send the user back to the login page.
+      location.href = "/login";
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     render(data);
