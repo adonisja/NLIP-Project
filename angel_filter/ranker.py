@@ -100,10 +100,14 @@ class RankedResult:
 
 # --- Ranker -------------------------------------------------------------------
 
+OPENAI_EMBED_MODEL = "text-embedding-3-small"
+
+
 class Ranker:
     def __init__(self, embed_model: str = DEFAULT_EMBED_MODEL):
         self.embed_model = embed_model
         self._ollama_available: bool | None = None
+        self._openai_available: bool | None = None
 
     async def rank(
         self,
@@ -118,21 +122,28 @@ class Ranker:
 
         constraints = constraints or QueryConstraints()
 
-        # Hard constraint filtering — remove results that clearly violate budget
-        # or minimum rating before scoring so they can't sneak into the top 5
         results = _apply_hard_constraints(results, constraints)
         if not results:
             return []
 
         if await self._has_ollama():
-            # Build fuzzy consensus map using embeddings when available
-            embeddings = await self._embed_all(results)
+            logger.info("Embedding backend: Ollama (%s)", self.embed_model)
+            embeddings = await self._embed_all_ollama(results)
             consensus  = _build_fuzzy_consensus(results, embeddings, FUZZY_THRESHOLD)
             scored     = await self._score_with_embeddings(
-                user_preference, results, intent, constraints, consensus, embeddings
+                user_preference, results, intent, constraints, consensus,
+                embeddings, backend="ollama",
+            )
+        elif await self._has_openai():
+            logger.info("Embedding backend: OpenAI (%s)", OPENAI_EMBED_MODEL)
+            embeddings = await self._embed_all_openai(results)
+            consensus  = _build_fuzzy_consensus(results, embeddings, FUZZY_THRESHOLD)
+            scored     = await self._score_with_embeddings(
+                user_preference, results, intent, constraints, consensus,
+                embeddings, backend="openai",
             )
         else:
-            logger.warning("Ollama unavailable; using keyword-overlap fallback.")
+            logger.warning("No embedding backend available — using keyword-overlap fallback.")
             consensus = _build_token_consensus(results)
             scored    = _score_with_keywords(
                 user_preference, results, intent, constraints, consensus
@@ -155,15 +166,50 @@ class Ranker:
             self._ollama_available = False
         return self._ollama_available
 
-    async def _embed_all(
+    async def _has_openai(self) -> bool:
+        if self._openai_available is not None:
+            return self._openai_available
+        import os
+        if not os.getenv("OPENAI_API_KEY"):
+            self._openai_available = False
+            return False
+        try:
+            await self._openai_embed("ping")
+            self._openai_available = True
+        except Exception as exc:
+            logger.info("OpenAI embedding probe failed: %s", exc)
+            self._openai_available = False
+        return self._openai_available
+
+    async def _openai_embed(self, text: str) -> list[float]:
+        import httpx, os
+        api_key = os.getenv("OPENAI_API_KEY")
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": OPENAI_EMBED_MODEL, "input": text},
+            )
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+
+    async def _embed_all_ollama(
         self, results: list[ProviderResult]
     ) -> dict[int, list[float]]:
-        """Return {result_index: embedding_vector} for every result."""
         import ollama
         vecs: dict[int, list[float]] = {}
         for i, r in enumerate(results):
             text = f"{r.title}. {r.snippet}"
             vecs[i] = ollama.embeddings(model=self.embed_model, prompt=text)["embedding"]
+        return vecs
+
+    async def _embed_all_openai(
+        self, results: list[ProviderResult]
+    ) -> dict[int, list[float]]:
+        vecs: dict[int, list[float]] = {}
+        for i, r in enumerate(results):
+            text = f"{r.title}. {r.snippet}"
+            vecs[i] = await self._openai_embed(text)
         return vecs
 
     async def _score_with_embeddings(
@@ -174,12 +220,15 @@ class Ranker:
         constraints: QueryConstraints,
         consensus: dict[str, int],
         embeddings: dict[int, list[float]],
+        backend: str = "ollama",
     ) -> list[RankedResult]:
-        import ollama
-
-        pref_vec = ollama.embeddings(
-            model=self.embed_model, prompt=user_preference
-        )["embedding"]
+        if backend == "ollama":
+            import ollama
+            pref_vec = ollama.embeddings(
+                model=self.embed_model, prompt=user_preference
+            )["embedding"]
+        else:
+            pref_vec = await self._openai_embed(user_preference)
 
         scored: list[RankedResult] = []
         for i, r in enumerate(results):

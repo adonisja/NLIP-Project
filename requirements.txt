@@ -1,0 +1,27 @@
+# Angel Filter — Python dependencies
+# Generated from the working local environment (Python 3.12.3)
+# Pin minor versions for reproducibility; patch versions float.
+
+# Web framework
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+starlette==0.50.0
+pydantic==2.12.5
+
+# HTTP client (used by all AI providers)
+httpx==0.28.1
+
+# Auth & sessions
+itsdangerous==2.2.0
+python-dotenv==1.2.1
+
+# Observability
+prometheus-client==0.25.0
+
+# Ollama client (embeddings + local LLM provider)
+# NOTE: Ollama itself must be installed and running separately.
+# On Render, omit OllamaProvider or point OLLAMA_URL at an external instance.
+ollama==0.6.2
+
+# Async runtime support
+anyio==4.12.1

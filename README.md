@@ -111,6 +111,25 @@ All changes go through pull requests — no direct commits to `main`, including 
 
 ---
 
+## Embedding backends
+
+Semantic similarity scoring requires an embedding model. The ranker tries
+three backends in order, using whichever is available:
+
+| Priority | Backend | When it's used |
+|---|---|---|
+| 1 | **Ollama** (`nomic-embed-text`) | Local development — Ollama running on `localhost:11434` |
+| 2 | **OpenAI** (`text-embedding-3-small`) | Cloud deployment — Ollama not available, `OPENAI_API_KEY` is set |
+| 3 | **Keyword overlap** | Last resort — no embedding backend available, scores are weaker |
+
+> **For Render deployment:** Ollama cannot run on Render's free tier. Set
+> `OPENAI_API_KEY` in Render's environment variables and the ranker will
+> automatically use OpenAI embeddings instead. All scoring, consensus
+> clustering, and axis weighting remain fully active — only the embedding
+> source changes.
+
+---
+
 ## How scoring works
 
 Every result is scored across four layers:

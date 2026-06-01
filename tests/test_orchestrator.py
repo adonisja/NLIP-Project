@@ -41,7 +41,9 @@ async def test_sponsored_results_are_penalized():
     from angel_filter.ranker import SPONSORED_PENALTY
 
     orch = Orchestrator(providers=[MockProvider()])
-    orch.ranker._ollama_available = False  # deterministic keyword path
+    orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False   # force keyword path — no Ollama
+    orch.ranker._openai_available = False   # force keyword path — no OpenAI
 
     # Use a query that matches ALL canned results equally (one shared token: "lunch")
     # so keyword similarity is the same for everyone — penalty is the only differentiator
@@ -74,7 +76,7 @@ async def test_orchestrator_tolerates_provider_failures():
     class BrokenProvider(BaseProvider):
         name = "broken"
 
-        async def query(self, user_query: str, max_results: int = 10):
+        async def query(self, user_query: str, max_results: int = 10, constraints=None):
             raise ProviderError("simulated outage")
 
     orch = Orchestrator(providers=[MockProvider(), BrokenProvider()])
@@ -93,7 +95,9 @@ async def test_orchestrator_tolerates_provider_failures():
 async def test_budget_constraint_demotes_over_budget_results():
     """With a $15 budget, SponsorCo Bistro ($28) should rank below cheaper spots."""
     orch = Orchestrator(providers=[MockProvider()])
-    orch.ranker._ollama_available = False  # deterministic keyword path
+    orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False   # force keyword path — no Ollama
+    orch.ranker._openai_available = False   # force keyword path — no OpenAI
 
     response = await orch.handle_query(
         user_query="lunch under $15 cheap pizza halal teriyaki",
@@ -115,6 +119,7 @@ async def test_nearest_query_favors_chipotle():
     """A 'nearest' query should surface Chipotle (0.3 mi, closest in the set)."""
     orch = Orchestrator(providers=[MockProvider()])
     orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False
 
     response = await orch.handle_query(
         user_query="nearest lunch spot nearby chipotle pizza halal",
@@ -135,6 +140,7 @@ async def test_highest_rated_query_favors_joes_pizza():
     """A 'best rated' query should surface Joe's Pizza (4.8★, highest in set)."""
     orch = Orchestrator(providers=[MockProvider()])
     orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False
 
     response = await orch.handle_query(
         user_query="best rated top reviewed pizza lunch",
@@ -155,6 +161,7 @@ async def test_axis_scores_present_on_all_results():
     """Every ranked result must carry P1/P2/P3 axis_scores."""
     orch = Orchestrator(providers=[MockProvider()])
     orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False
 
     response = await orch.handle_query(user_query="pizza lunch", top_k=5)
 
@@ -179,7 +186,8 @@ async def test_consensus_bonus_applied_when_two_providers_agree():
     mock_b = MockProvider(name="mock_b")
 
     orch = Orchestrator(providers=[mock_a, mock_b])
-    orch.ranker._ollama_available = False  # token consensus path
+    orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False  # token consensus path
 
     response = await orch.handle_query(
         user_query="pizza lunch halal teriyaki chipotle",

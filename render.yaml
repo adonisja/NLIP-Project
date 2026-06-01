@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: angel-filter
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn angel_filter.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: ANGEL_COOKIE_SECURE
+        value: "true"
+      - key: ANGEL_COOKIE_SAMESITE
+        value: lax
+      # Set these in Render dashboard — never commit secrets
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OLLAMA_MODEL
+        sync: false
+      - key: BRAVE_API_KEY
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_OAUTH_CALLBACK_URL
+        sync: false
+      - key: ANGEL_ALLOWED_USERS
+        sync: false
+      - key: ANGEL_SESSION_SECRET
+        sync: false
+      - key: ANGEL_DAILY_QUERY_LIMIT
+        value: "200"
+      - key: ANGEL_USER_RATE_LIMIT
+        value: "20"
+      - key: ANGEL_USER_RATE_WINDOW
+        value: "60"
