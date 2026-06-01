@@ -37,6 +37,8 @@ from angel_filter.limits import daily_budget_status, enforce_query_limits
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.providers import BraveProvider, GeminiProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
+logger = logging.getLogger(__name__)
+
 # Secret used to sign session cookies. MUST be set in production — if it's
 # missing we use a random per-process value so the demo still boots, but
 # every restart will invalidate existing sessions, which is the desired
@@ -53,8 +55,6 @@ if not os.getenv("ANGEL_SESSION_SECRET"):
 # Local HTTP dev must set ANGEL_COOKIE_SECURE=false to log in over http://.
 _COOKIE_SECURE = os.getenv("ANGEL_COOKIE_SECURE", "true").lower() == "true"
 _COOKIE_SAMESITE = os.getenv("ANGEL_COOKIE_SAMESITE", "lax")
-
-logger = logging.getLogger(__name__)
 
 # --- Prometheus metrics -------------------------------------------------------
 QUERY_COUNT = Counter(
