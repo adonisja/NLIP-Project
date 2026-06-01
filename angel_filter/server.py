@@ -33,6 +33,7 @@ from angel_filter.auth import (
     new_oauth_state,
     require_session,
 )
+from angel_filter.cache import CACHE
 from angel_filter.limits import daily_budget_status, enforce_query_limits
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.providers import BraveProvider, GeminiProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
