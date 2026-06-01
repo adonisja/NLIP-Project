@@ -16,6 +16,7 @@ pydantic = "^2.8.0"
 ollama = "^0.3.0"
 python-dotenv = "^1.0.1"
 prometheus-client = "^0.20.0"
+itsdangerous = "^2.2.0"
 
 # NLIP libraries per Mentor D
 nlip-sdk = { git = "https://github.com/nlip-project/nlip_sdk.git", branch = "main" }
