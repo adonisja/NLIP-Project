@@ -206,11 +206,20 @@ class Ranker:
     async def _embed_all_openai(
         self, results: list[ProviderResult]
     ) -> dict[int, list[float]]:
-        vecs: dict[int, list[float]] = {}
-        for i, r in enumerate(results):
-            text = f"{r.title}. {r.snippet}"
-            vecs[i] = await self._openai_embed(text)
-        return vecs
+        import httpx, os
+        # Batch all texts in a single API call — much faster than one call per result
+        texts = [f"{r.title}. {r.snippet}" for r in results]
+        api_key = os.getenv("OPENAI_API_KEY")
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": OPENAI_EMBED_MODEL, "input": texts},
+            )
+            resp.raise_for_status()
+            data = resp.json()["data"]
+            # API returns embeddings in the same order as input
+            return {i: item["embedding"] for i, item in enumerate(data)}
 
     async def _score_with_embeddings(
         self,

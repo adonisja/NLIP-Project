@@ -406,6 +406,14 @@ else:
 
     @app.post("/query")
     async def query(body: QueryIn, _user: str = Depends(enforce_query_limits)):
+        from fastapi import HTTPException as _HTTPException
+
+        # Return cached result if fresh
+        cached = CACHE.get(body.query, body.preference)
+        if cached:
+            logger.info("Cache hit for query: %r", body.query)
+            return cached
+
         with QUERY_LATENCY.time():
             try:
                 response = await ORCHESTRATOR.handle_query(
@@ -416,9 +424,13 @@ else:
                 for r in response.ranked:
                     if r.result.sponsored:
                         SPONSORED_PENALTY_COUNT.inc()
-            except Exception:
+            except Exception as exc:
                 QUERY_COUNT.labels(status="error").inc()
-                raise
+                logger.exception("Query failed: %s", exc)
+                raise _HTTPException(
+                    status_code=503,
+                    detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
+                )
 
         payload = {
             "providers_used": response.providers_used,
