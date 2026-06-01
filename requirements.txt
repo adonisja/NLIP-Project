@@ -25,3 +25,4 @@ ollama==0.6.2
 
 # Async runtime support
 anyio==4.12.1
+watchfiles==1.1.1
