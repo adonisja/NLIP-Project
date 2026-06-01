@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Angel Filter</title>
+<script src="/static/plotly.min.js"></script>
 <style>
   :root {
     --bg: #0f1420; --card: #1a2032; --ink: #e8ecf5; --muted: #93a0b8;
@@ -12,11 +13,7 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--ink); }
-<<<<<<< Updated upstream
-  main { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
-=======
   main { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
->>>>>>> Stashed changes
   h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.02em; }
   .sub { color: var(--muted); margin-bottom: 28px; }
   form { display: grid; gap: 10px; margin-bottom: 24px; }
@@ -63,8 +60,6 @@
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .error { color: var(--warn); }
-<<<<<<< Updated upstream
-=======
 
   /* History dropdown */
   .history-wrap { position: relative; margin-bottom: 8px; }
@@ -99,7 +94,7 @@
   #plot-3d { width: 100%; height: 640px; border-radius: 14px; overflow: hidden; background: var(--card); border: 1px solid var(--border); opacity: 0; transition: opacity 0.5s ease; }
   #plot-3d.loaded { opacity: 1; }
   #plot-radar { width: 100%; height: 420px; border-radius: 14px; overflow: hidden; background: var(--card); border: 1px solid var(--border); }
->>>>>>> Stashed changes
+  .plot-unavailable { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 14px; }
 </style>
 </head>
 <body>
@@ -122,14 +117,6 @@
   </form>
 
   <div id="out"></div>
-<<<<<<< Updated upstream
-</main>
-
-<script>
-const form = document.getElementById("f");
-const out  = document.getElementById("out");
-const btn  = document.getElementById("go");
-=======
 
   <div id="viz-wrap" style="display:none" class="viz-section">
     <div class="viz-tabs">
@@ -162,10 +149,10 @@ const PROVIDER_COLORS = {
   brave:      "#e05c2a",
   mock:       "#7c3aed",
 };
->>>>>>> Stashed changes
 
-// Max score seen this session — used to normalize score bars
 let _maxScore = 1;
+// Store current query results for history replay
+let _lastQueries = [];
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -174,11 +161,8 @@ form.addEventListener("submit", async (e) => {
   if (!query) return;
 
   btn.disabled = true;
-<<<<<<< Updated upstream
-=======
   vizWrap.style.display = "none";
   document.getElementById("plot-3d").classList.remove("loaded");
->>>>>>> Stashed changes
   out.innerHTML = `<div class="meta">Querying providers…</div>`;
 
   try {
@@ -188,23 +172,25 @@ form.addEventListener("submit", async (e) => {
       body: JSON.stringify({ query, preference }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-<<<<<<< Updated upstream
-    render(await res.json());
-=======
     const data = await res.json();
-    _maxScore = Math.max(...(data.results || []).map(r => r.score), 1);
+    const scores = (data.results || []).map(r => r.score).filter(s => isFinite(s));
+    _maxScore = scores.length ? Math.max(...scores) : 1;
     render(data);
     if ((data.results || []).length > 0) {
-      render3D(data.results);
-      renderRadar(data.results.slice(0, 3));
-      vizWrap.style.display = "block";
-      // Fade-in + auto-rotate the 3D plot
-      setTimeout(() => {
-        document.getElementById("plot-3d").classList.add("loaded");
-        autoRotate();
-      }, 100);
+      if (window.Plotly) {
+        render3D(data.results);
+        renderRadar(data.results.slice(0, 3));
+        vizWrap.style.display = "block";
+        setTimeout(() => {
+          document.getElementById("plot-3d").classList.add("loaded");
+          autoRotate();
+        }, 100);
+      } else {
+        vizWrap.style.display = "block";
+        document.getElementById("plot-3d").innerHTML =
+          `<div class="plot-unavailable">Plotly not loaded — download plotly.min.js to static/ to enable 3D visualization.</div>`;
+      }
     }
->>>>>>> Stashed changes
   } catch (err) {
     out.innerHTML = `<div class="card error">Request failed: ${esc(err.message)}</div>`;
   } finally {
@@ -212,34 +198,29 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-// --- Auto-rotate the 3D plot for 4 seconds on load --------------------
+// --- Auto-rotate 3D plot one full turn on load ---
 function autoRotate() {
   const el = document.getElementById("plot-3d");
-  if (!el._layout) return;
+  if (!el._layout || !window.Plotly) return;
   let angle = 0;
   const steps = 80;
+  el._rotateStep = 0;
   const id = setInterval(() => {
     angle += (2 * Math.PI) / steps;
     Plotly.relayout("plot-3d", {
-      "scene.camera.eye": {
-        x: 1.6 * Math.cos(angle),
-        y: 1.6 * Math.sin(angle),
-        z: 1.2,
-      },
+      "scene.camera.eye": { x: 1.6 * Math.cos(angle), y: 1.6 * Math.sin(angle), z: 1.2 },
     });
     if (++el._rotateStep >= steps) clearInterval(id);
   }, 50);
-  el._rotateStep = 0;
 }
 
-// --- Render results list ----------------------------------------------
+// --- Render results list ---
 function render(data) {
   const results = data.results || [];
   const used    = (data.providers_used || []).join(", ") || "none";
   const failed  = (data.providers_failed || []).join(", ");
   const intent  = data.intent || "general";
 
-  // Provider breakdown panel
   const providerCounts = {};
   results.forEach(r => { providerCounts[r.provider] = (providerCounts[r.provider] || 0) + 1; });
   const breakdownHtml = Object.entries(providerCounts).map(([p, n]) =>
@@ -264,11 +245,6 @@ function render(data) {
     return;
   }
 
-<<<<<<< Updated upstream
-  // --- Best answer (first result) ---
-=======
-  // Best answer
->>>>>>> Stashed changes
   const best = results[0];
   const axes = best.axis_scores || {};
   const axisHtml = Object.entries(axes).map(([k, v]) =>
@@ -279,14 +255,14 @@ function render(data) {
     <div class="best-label">Angel Filter's best answer</div>
     <div class="best-title">${esc(best.title)}</div>
     <div class="best-snippet">${esc(best.snippet || "")}</div>
-    ${best.url ? `<div class="best-snippet"><a href="${esc(best.url)}" target="_blank" rel="noopener">${esc(best.url)}</a></div>` : ""}
+    ${safeLink(best.url)}
     ${(best.consensus_count || 0) > 1
       ? `<div class="consensus-bar"><div class="consensus-dot"></div>${esc(String(best.consensus_count))} providers agreed on this answer</div>`
       : ""}
     <div class="axis-row">${axisHtml}</div>
     ${scoreBar(best.score, "#dc2626")}
     <div class="row">
-      <span class="chip">score ${best.score}</span>
+      <span class="chip">score ${esc(String(best.score))}</span>
       <span class="chip" style="background:${PROVIDER_COLORS[best.provider] || "#202840"}22;color:${PROVIDER_COLORS[best.provider] || "var(--muted)"}">
         ${esc(best.provider)}
       </span>
@@ -300,7 +276,6 @@ function render(data) {
     <div class="snippet" style="margin-top:8px"><em>${esc(best.rationale || "")}</em></div>
   </div>`;
 
-  // --- Toggle for remaining results ---
   if (results.length > 1) {
     html += `<button class="toggle-btn" onclick="toggleOthers(this)">
       Show other responses (${results.length - 1})
@@ -314,10 +289,10 @@ function render(data) {
         <span class="card-title">${esc(r.title)}</span>
         ${r.sponsored ? `<span class="chip sponsored" style="font-size:11px;margin-left:6px">sponsored</span>` : ""}
         <div class="snippet">${esc(r.snippet || "")}</div>
-        ${r.url ? `<div class="snippet"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></div>` : ""}
+        ${safeLink(r.url)}
         ${scoreBar(r.score, r.sponsored ? "#b45309" : pColor)}
         <div class="row">
-          <span class="chip">score ${r.score}</span>
+          <span class="chip">score ${esc(String(r.score))}</span>
           <span class="chip" style="background:${pColor}22;color:${pColor}">${esc(r.provider)}</span>
           ${r.sponsored
             ? `<span class="chip sponsored">sponsored · penalized</span>`
@@ -336,54 +311,48 @@ function render(data) {
   out.innerHTML = html;
 }
 
-<<<<<<< Updated upstream
-function toggleOthers(btn) {
-  const el = document.getElementById("others");
-  const open = el.classList.toggle("open");
-  const count = (el.querySelectorAll(".card") || []).length;
-  btn.textContent = open
-    ? `Hide other responses (${count})`
-    : `Show other responses (${count})`;
-=======
+// Fix #5 — only render http/https URLs as links
+function safeLink(url) {
+  if (!url) return "";
+  const safe = /^https?:\/\//i.test(url);
+  if (!safe) return "";
+  return `<div class="best-snippet"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></div>`;
+}
+
+// Fix #6 — clamp pct to 0-100, guard NaN
 function scoreBar(score, color) {
-  const pct = Math.round((score / _maxScore) * 100);
+  const raw = isFinite(_maxScore) && _maxScore > 0 ? (score / _maxScore) * 100 : 0;
+  const pct = Math.max(0, Math.min(100, isFinite(raw) ? Math.round(raw) : 0));
   return `<div class="score-bar-wrap">
-    <div class="score-bar-label"><span>Score</span><span>${score}</span></div>
+    <div class="score-bar-label"><span>Score</span><span>${esc(String(score))}</span></div>
     <div class="score-bar-track">
       <div class="score-bar-fill" style="width:${pct}%;background:${color}"></div>
     </div>
   </div>`;
 }
 
-// --- 3D scatter plot ---------------------------------------------------
+// --- 3D scatter plot ---
 function render3D(results) {
-  const winnerTitle = results[0].title;
+  // Fix #4 — use index (i === 0) not title equality for winner detection
   const xs = results.map(r => (r.axis_scores || {}).P1_price    || 0.5);
   const ys = results.map(r => (r.axis_scores || {}).P2_distance || 0.5);
   const zs = results.map(r => (r.axis_scores || {}).P3_rating   || 0.5);
 
-  const isWinner  = r => r.title === winnerTitle;
-  const isSponsored = r => !!r.sponsored;
+  const colors  = results.map((r, i) => i === 0 ? "#dc2626" : r.sponsored ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
+  const sizes   = results.map((r, i) => i === 0 ? 16 : 10);
+  const symbols = results.map((r, i) => i === 0 ? "diamond" : r.sponsored ? "x" : "circle");
+  const labels  = results.map((r, i) => i === 0 ? `Winner: ${r.title}` : `#${i + 1}: ${r.title}`);
 
-  const colors  = results.map(r => isWinner(r) ? "#dc2626" : isSponsored(r) ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
-  const sizes   = results.map(r => isWinner(r) ? 16 : 10);
-  const symbols = results.map(r => isWinner(r) ? "diamond" : isSponsored(r) ? "x" : "circle");
-  const labels  = results.map((r, i) => isWinner(r) ? `Winner: ${r.title}` : `#${i + 1}: ${r.title}`);
-
-  // Lines from origin to each point
   const lineTraces = results.map((r, i) => ({
     x: [0, xs[i]], y: [0, ys[i]], z: [0, zs[i]],
     mode: "lines", type: "scatter3d",
-    line: { color: colors[i], width: isWinner(r) ? 6 : isSponsored(r) ? 2 : 3, dash: isWinner(r) ? "solid" : isSponsored(r) ? "dot" : "dot" },
-    opacity: isWinner(r) ? 0.9 : isSponsored(r) ? 0.3 : 0.45,
+    line: { color: colors[i], width: i === 0 ? 6 : r.sponsored ? 2 : 3, dash: i === 0 ? "solid" : "dot" },
+    opacity: i === 0 ? 0.9 : r.sponsored ? 0.3 : 0.45,
     hoverinfo: "skip", showlegend: false,
   }));
 
-  // Sponsored penalty zone — translucent red cube in low-score corner
   const penaltyZone = {
-    x: [0,0,0,0, 0.4,0.4,0.4,0.4],
-    y: [0,0,0.4,0.4, 0,0,0.4,0.4],
-    z: [0,0.4,0,0.4, 0,0.4,0,0.4],
+    x: [0,0,0,0,0.4,0.4,0.4,0.4], y: [0,0,0.4,0.4,0,0,0.4,0.4], z: [0,0.4,0,0.4,0,0.4,0,0.4],
     mode: "markers", type: "scatter3d",
     marker: { size: 3, color: "#dc262620", symbol: "square" },
     hovertemplate: "<b>Sponsored penalty zone</b><extra></extra>",
@@ -404,20 +373,15 @@ function render3D(results) {
       r.sponsored ? "⚠ sponsored — penalty applied" : "organic",
     ]),
     hovertemplate:
-      "<b>%{customdata[0]}</b><br>" +
-      "Provider: %{customdata[1]}<br>" +
-      "Score: %{customdata[2]}<br>" +
-      "P1 price: %{customdata[3]}<br>" +
-      "P2 distance: %{customdata[4]}<br>" +
-      "P3 rating: %{customdata[5]}<br>" +
+      "<b>%{customdata[0]}</b><br>Provider: %{customdata[1]}<br>Score: %{customdata[2]}<br>" +
+      "P1 price: %{customdata[3]}<br>P2 distance: %{customdata[4]}<br>P3 rating: %{customdata[5]}<br>" +
       "<i>%{customdata[6]}</i><extra></extra>",
     marker: { size: sizes, color: colors, symbol: symbols, opacity: 0.95, line: { color: "#ffffff", width: 1.5 } },
     showlegend: false,
   };
 
   const originTrace = {
-    x: [0], y: [0], z: [0],
-    text: ["Query origin"],
+    x: [0], y: [0], z: [0], text: ["Query origin"],
     mode: "markers+text", type: "scatter3d",
     textposition: "bottom center",
     textfont: { size: 12, color: "#93a0b8" },
@@ -429,51 +393,45 @@ function render3D(results) {
   const seenProviders = [...new Set(results.map(r => r.provider))];
   const legendTraces = [
     ...seenProviders.map(p => ({
-      x: [null], y: [null], z: [null], mode: "markers", type: "scatter3d",
-      marker: { size: 9, color: PROVIDER_COLORS[p] || "#6aa9ff" },
-      name: p, hoverinfo: "skip", showlegend: true,
+      x:[null],y:[null],z:[null], mode:"markers", type:"scatter3d",
+      marker:{size:9,color:PROVIDER_COLORS[p]||"#6aa9ff"}, name:p, hoverinfo:"skip", showlegend:true,
     })),
-    { x:[null],y:[null],z:[null], mode:"markers", type:"scatter3d", marker:{size:9,color:"#dc2626",symbol:"diamond"}, name:"Winner", hoverinfo:"skip", showlegend:true },
-    { x:[null],y:[null],z:[null], mode:"markers", type:"scatter3d", marker:{size:9,color:"#b45309",symbol:"x"}, name:"Sponsored", hoverinfo:"skip", showlegend:true },
+    {x:[null],y:[null],z:[null], mode:"markers", type:"scatter3d", marker:{size:9,color:"#dc2626",symbol:"diamond"}, name:"Winner", hoverinfo:"skip", showlegend:true},
+    {x:[null],y:[null],z:[null], mode:"markers", type:"scatter3d", marker:{size:9,color:"#b45309",symbol:"x"}, name:"Sponsored", hoverinfo:"skip", showlegend:true},
   ];
 
   const layout = {
-    margin: { l: 0, r: 0, b: 0, t: 40 },
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor:  "rgba(0,0,0,0)",
-    font: { color: "#93a0b8", size: 12 },
+    margin: {l:0,r:0,b:0,t:40},
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: {color:"#93a0b8", size:12},
     scene: {
-      xaxis: { title: "P1 Price score",    backgroundcolor: "rgba(255,255,255,0.03)", gridcolor: "rgba(255,255,255,0.07)", zerolinecolor: "rgba(255,255,255,0.15)", range: [0,1] },
-      yaxis: { title: "P2 Distance score", backgroundcolor: "rgba(255,255,255,0.03)", gridcolor: "rgba(255,255,255,0.07)", zerolinecolor: "rgba(255,255,255,0.15)", range: [0,1] },
-      zaxis: { title: "P3 Rating score",   backgroundcolor: "rgba(255,255,255,0.03)", gridcolor: "rgba(255,255,255,0.07)", zerolinecolor: "rgba(255,255,255,0.15)", range: [0,1] },
-      camera: { eye: { x: 1.6, y: 1.4, z: 1.2 } },
-      aspectmode: "cube",
+      xaxis:{title:"P1 Price score",    backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      yaxis:{title:"P2 Distance score", backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      zaxis:{title:"P3 Rating score",   backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      camera:{eye:{x:1.6,y:1.4,z:1.2}}, aspectmode:"cube",
     },
-    legend: { orientation: "h", x: 0, y: 1.02, yanchor: "bottom", xanchor: "left", bgcolor: "rgba(26,32,50,0.9)", bordercolor: "rgba(255,255,255,0.1)", borderwidth: 1 },
-    showlegend: true,
+    legend:{orientation:"h",x:0,y:1.02,yanchor:"bottom",xanchor:"left",bgcolor:"rgba(26,32,50,0.9)",bordercolor:"rgba(255,255,255,0.1)",borderwidth:1},
+    showlegend:true,
   };
 
   const el = document.getElementById("plot-3d");
   el._layout = layout;
-  Plotly.newPlot("plot-3d", [...lineTraces, penaltyZone, pointTrace, originTrace, ...legendTraces], layout, { responsive: true, displayModeBar: false });
+  Plotly.newPlot("plot-3d", [...lineTraces, penaltyZone, pointTrace, originTrace, ...legendTraces], layout, {responsive:true, displayModeBar:false});
 }
 
-// --- Radar chart -------------------------------------------------------
+// --- Radar chart ---
 function renderRadar(top3) {
   const axes = ["P1 Price", "P2 Distance", "P3 Rating"];
   const keys = ["P1_price", "P2_distance", "P3_rating"];
 
   const traces = top3.map((r, i) => {
     const vals = keys.map(k => (r.axis_scores || {})[k] || 0);
-    vals.push(vals[0]); // close the polygon
+    vals.push(vals[0]);
     const color = i === 0 ? "#dc2626" : (PROVIDER_COLORS[r.provider] || "#6aa9ff");
     return {
-      type: "scatterpolar",
-      r: vals,
-      theta: [...axes, axes[0]],
-      fill: "toself",
-      fillcolor: color + "30",
-      line: { color, width: 2 },
+      type: "scatterpolar", r: vals, theta: [...axes, axes[0]],
+      fill: "toself", fillcolor: color + "30",
+      line: {color, width:2},
       name: r.title.length > 20 ? r.title.slice(0, 18) + "…" : r.title,
       hovertemplate: `<b>${esc(r.title)}</b><br>%{theta}: %{r:.2f}<extra></extra>`,
     };
@@ -482,37 +440,30 @@ function renderRadar(top3) {
   Plotly.newPlot("plot-radar", traces, {
     polar: {
       bgcolor: "rgba(0,0,0,0)",
-      radialaxis: { visible: true, range: [0, 1], color: "#93a0b8", gridcolor: "rgba(255,255,255,0.08)" },
-      angularaxis: { color: "#93a0b8", gridcolor: "rgba(255,255,255,0.08)" },
+      radialaxis:{visible:true, range:[0,1], color:"#93a0b8", gridcolor:"rgba(255,255,255,0.08)"},
+      angularaxis:{color:"#93a0b8", gridcolor:"rgba(255,255,255,0.08)"},
     },
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor:  "rgba(0,0,0,0)",
-    font: { color: "#93a0b8" },
-    legend: { x: 0.5, y: -0.1, xanchor: "center", orientation: "h", bgcolor: "rgba(26,32,50,0.9)" },
-    margin: { l: 60, r: 60, t: 40, b: 60 },
-    showlegend: true,
-  }, { responsive: true, displayModeBar: false });
+    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)",
+    font:{color:"#93a0b8"},
+    legend:{x:0.5,y:-0.1,xanchor:"center",orientation:"h",bgcolor:"rgba(26,32,50,0.9)"},
+    margin:{l:60,r:60,t:40,b:60},
+    showlegend:true,
+  }, {responsive:true, displayModeBar:false});
 }
 
-// --- Tab switching -----------------------------------------------------
+// Fix #2 — tab switching uses DOM elements not strings for Plotly.Plots.resize
 function switchTab(name, tabEl) {
   document.querySelectorAll(".viz-tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".viz-panel").forEach(p => p.classList.remove("active"));
   tabEl.classList.add("active");
   document.getElementById("panel-" + name).classList.add("active");
-  if (name === "3d") Plotly.Plots.resize("plot-3d");
-  if (name === "radar") Plotly.Plots.resize("plot-radar");
+  if (!window.Plotly) return;
+  if (name === "3d")    Plotly.Plots.resize(document.getElementById("plot-3d"));
+  if (name === "radar") Plotly.Plots.resize(document.getElementById("plot-radar"));
 }
 
-function toggleOthers(btn) {
-  const el = document.getElementById("others");
-  const open = el.classList.toggle("open");
-  const count = el.querySelectorAll(".card").length;
-  btn.textContent = open ? `Hide other responses (${count})` : `Show other responses (${count})`;
->>>>>>> Stashed changes
-}
-
-// --- Query history ----------------------------------------------------
+// --- Query history ---
+// Fix #1 — use data-query attribute + delegated click listener, no inline onclick injection
 async function toggleHistory() {
   const dropdown = document.getElementById("history-dropdown");
   if (dropdown.classList.contains("open")) {
@@ -524,14 +475,18 @@ async function toggleHistory() {
     const data = await res.json();
     const queries = data.queries || [];
     if (!queries.length) {
-      dropdown.innerHTML = `<div class="history-item"><span class="history-item-text" style="color:var(--muted)">No recent queries yet</span></div>`;
+      dropdown.innerHTML = `<div class="history-item"><span class="history-item-text">No recent queries yet</span></div>`;
     } else {
       dropdown.innerHTML = queries.map(q =>
-        `<div class="history-item" onclick="loadHistory(${JSON.stringify(esc(q))})">
+        `<div class="history-item" data-query="${esc(q)}">
           <span class="history-item-text">${esc(q)}</span>
           <span class="history-cache-badge">cached</span>
         </div>`
       ).join("");
+      // Attach listeners via addEventListener — no inline onclick needed
+      dropdown.querySelectorAll(".history-item[data-query]").forEach(el => {
+        el.addEventListener("click", () => loadHistory(el.dataset.query));
+      });
     }
     dropdown.classList.add("open");
   } catch (e) {
@@ -545,12 +500,18 @@ function loadHistory(query) {
   document.getElementById("f").requestSubmit();
 }
 
-// Close history dropdown when clicking outside
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".history-wrap") && !e.target.closest(".toggle-btn")) {
     document.getElementById("history-dropdown").classList.remove("open");
   }
 });
+
+function toggleOthers(btn) {
+  const el = document.getElementById("others");
+  const open = el.classList.toggle("open");
+  const count = el.querySelectorAll(".card").length;
+  btn.textContent = open ? `Hide other responses (${count})` : `Show other responses (${count})`;
+}
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c =>
