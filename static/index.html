@@ -95,9 +95,14 @@
   #plot-3d.loaded { opacity: 1; }
   #plot-radar { width: 100%; height: 420px; border-radius: 14px; overflow: hidden; background: var(--card); border: 1px solid var(--border); }
   .plot-unavailable { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 14px; }
+  .logout { position: fixed; top: 16px; left: 16px; background: var(--card); color: var(--muted); border: 1px solid #2a3450; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
+  .logout:hover { color: var(--ink); border-color: #3a4868; }
+  .logout:disabled { opacity: 0.5; cursor: wait; }
+
 </style>
 </head>
 <body>
+<button id="logout" class="logout" type="button">Log out</button>
 <main>
   <h1>Angel Filter</h1>
   <p class="sub">Asks multiple AI providers, finds what they agree on, ranks by what <em>you</em> care about.</p>
@@ -149,10 +154,30 @@ const PROVIDER_COLORS = {
   brave:      "#e05c2a",
   mock:       "#7c3aed",
 };
+</main>
+
+<script>
+const form = document.getElementById("f");
+const out = document.getElementById("out");
+const btn = document.getElementById("go");
+const logoutBtn = document.getElementById("logout");
+
+logoutBtn.addEventListener("click", async () => {
+  logoutBtn.disabled = true;
+  try {
+    await fetch("/logout", { method: "POST" });
+  } catch (_) {
+    // Even if the network call fails, send the user to /login —
+    // the session cookie is cleared client-side on the next navigation.
+  } finally {
+    location.href = "/login";
+  }
+});
 
 let _maxScore = 1;
 // Store current query results for history replay
 let _lastQueries = [];
+
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -171,6 +196,11 @@ form.addEventListener("submit", async (e) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query, preference }),
     });
+    if (res.status === 401) {
+      // Session expired or missing — send the user back to the login page.
+      location.href = "/login";
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const scores = (data.results || []).map(r => r.score).filter(s => isFinite(s));
@@ -191,6 +221,7 @@ form.addEventListener("submit", async (e) => {
           `<div class="plot-unavailable">Plotly not loaded — download plotly.min.js to static/ to enable 3D visualization.</div>`;
       }
     }
+    render(await res.json());
   } catch (err) {
     out.innerHTML = `<div class="card error">Request failed: ${esc(err.message)}</div>`;
   } finally {
@@ -245,6 +276,7 @@ function render(data) {
     return;
   }
 
+  // --- Best answer (first result) ---
   const best = results[0];
   const axes = best.axis_scores || {};
   const axisHtml = Object.entries(axes).map(([k, v]) =>
@@ -464,6 +496,16 @@ function switchTab(name, tabEl) {
 
 // --- Query history ---
 // Fix #1 — use data-query attribute + delegated click listener, no inline onclick injection
+function toggleOthers(btn) {
+  const el = document.getElementById("others");
+  const open = el.classList.toggle("open");
+  const count = (el.querySelectorAll(".card") || []).length;
+  btn.textContent = open
+    ? `Hide other responses (${count})`
+    : `Show other responses (${count})`;
+}
+
+// --- Query history ----------------------------------------------------
 async function toggleHistory() {
   const dropdown = document.getElementById("history-dropdown");
   if (dropdown.classList.contains("open")) {
