@@ -63,8 +63,6 @@
 
   /* History dropdown */
   .history-wrap { position: relative; margin-bottom: 8px; }
-  .history-btn { background: none; border: 1px solid var(--border); color: var(--muted); font: inherit; font-size: 13px; border-radius: 8px; padding: 6px 14px; cursor: pointer; width: 100%; text-align: left; }
-  .history-btn:hover { border-color: var(--accent); color: var(--accent); }
   .history-dropdown { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; z-index: 100; overflow: hidden; box-shadow: 0 8px 24px #00000055; }
   .history-dropdown.open { display: block; }
   .history-item { padding: 10px 14px; font-size: 13px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
@@ -95,10 +93,11 @@
   #plot-3d.loaded { opacity: 1; }
   #plot-radar { width: 100%; height: 420px; border-radius: 14px; overflow: hidden; background: var(--card); border: 1px solid var(--border); }
   .plot-unavailable { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 14px; }
+
+  /* Logout button */
   .logout { position: fixed; top: 16px; left: 16px; background: var(--card); color: var(--muted); border: 1px solid #2a3450; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
   .logout:hover { color: var(--ink); border-color: #3a4868; }
   .logout:disabled { opacity: 0.5; cursor: wait; }
-
 </style>
 </head>
 <body>
@@ -140,10 +139,11 @@
 </main>
 
 <script>
-const form    = document.getElementById("f");
-const out     = document.getElementById("out");
-const btn     = document.getElementById("go");
-const vizWrap = document.getElementById("viz-wrap");
+const form     = document.getElementById("f");
+const out      = document.getElementById("out");
+const btn      = document.getElementById("go");
+const vizWrap  = document.getElementById("viz-wrap");
+const logoutBtn = document.getElementById("logout");
 
 const PROVIDER_COLORS = {
   gemini:     "#0f766e",
@@ -154,30 +154,20 @@ const PROVIDER_COLORS = {
   brave:      "#e05c2a",
   mock:       "#7c3aed",
 };
-</main>
 
-<script>
-const form = document.getElementById("f");
-const out = document.getElementById("out");
-const btn = document.getElementById("go");
-const logoutBtn = document.getElementById("logout");
+let _maxScore = 1;
+let _rotateTimer = null;  // track rotation interval so we can clear it
 
 logoutBtn.addEventListener("click", async () => {
   logoutBtn.disabled = true;
   try {
     await fetch("/logout", { method: "POST" });
   } catch (_) {
-    // Even if the network call fails, send the user to /login —
-    // the session cookie is cleared client-side on the next navigation.
+    // redirect even if network call fails
   } finally {
     location.href = "/login";
   }
 });
-
-let _maxScore = 1;
-// Store current query results for history replay
-let _lastQueries = [];
-
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -196,11 +186,7 @@ form.addEventListener("submit", async (e) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query, preference }),
     });
-    if (res.status === 401) {
-      // Session expired or missing — send the user back to the login page.
-      location.href = "/login";
-      return;
-    }
+    if (res.status === 401) { location.href = "/login"; return; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const scores = (data.results || []).map(r => r.score).filter(s => isFinite(s));
@@ -218,10 +204,9 @@ form.addEventListener("submit", async (e) => {
       } else {
         vizWrap.style.display = "block";
         document.getElementById("plot-3d").innerHTML =
-          `<div class="plot-unavailable">Plotly not loaded — download plotly.min.js to static/ to enable 3D visualization.</div>`;
+          `<div class="plot-unavailable">3D visualization unavailable — download plotly.min.js into static/ to enable it.</div>`;
       }
     }
-    render(await res.json());
   } catch (err) {
     out.innerHTML = `<div class="card error">Request failed: ${esc(err.message)}</div>`;
   } finally {
@@ -229,23 +214,23 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-// --- Auto-rotate 3D plot one full turn on load ---
+// Fix: clear existing timer before starting a new one to prevent overlapping rotations
 function autoRotate() {
+  if (_rotateTimer) { clearInterval(_rotateTimer); _rotateTimer = null; }
   const el = document.getElementById("plot-3d");
   if (!el._layout || !window.Plotly) return;
   let angle = 0;
   const steps = 80;
-  el._rotateStep = 0;
-  const id = setInterval(() => {
+  let step = 0;
+  _rotateTimer = setInterval(() => {
     angle += (2 * Math.PI) / steps;
     Plotly.relayout("plot-3d", {
       "scene.camera.eye": { x: 1.6 * Math.cos(angle), y: 1.6 * Math.sin(angle), z: 1.2 },
     });
-    if (++el._rotateStep >= steps) clearInterval(id);
+    if (++step >= steps) { clearInterval(_rotateTimer); _rotateTimer = null; }
   }, 50);
 }
 
-// --- Render results list ---
 function render(data) {
   const results = data.results || [];
   const used    = (data.providers_used || []).join(", ") || "none";
@@ -276,7 +261,6 @@ function render(data) {
     return;
   }
 
-  // --- Best answer (first result) ---
   const best = results[0];
   const axes = best.axis_scores || {};
   const axisHtml = Object.entries(axes).map(([k, v]) =>
@@ -287,7 +271,7 @@ function render(data) {
     <div class="best-label">Angel Filter's best answer</div>
     <div class="best-title">${esc(best.title)}</div>
     <div class="best-snippet">${esc(best.snippet || "")}</div>
-    ${safeLink(best.url)}
+    ${safeLink(best.url, "best-snippet")}
     ${(best.consensus_count || 0) > 1
       ? `<div class="consensus-bar"><div class="consensus-dot"></div>${esc(String(best.consensus_count))} providers agreed on this answer</div>`
       : ""}
@@ -298,22 +282,15 @@ function render(data) {
       <span class="chip" style="background:${PROVIDER_COLORS[best.provider] || "#202840"}22;color:${PROVIDER_COLORS[best.provider] || "var(--muted)"}">
         ${esc(best.provider)}
       </span>
-      ${best.sponsored
-        ? `<span class="chip sponsored">sponsored · penalized</span>`
-        : `<span class="chip good">organic</span>`}
-      ${(best.consensus_count || 0) > 1
-        ? `<span class="chip agreed">${esc(String(best.consensus_count))} agreed</span>`
-        : ""}
+      ${best.sponsored ? `<span class="chip sponsored">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
+      ${(best.consensus_count || 0) > 1 ? `<span class="chip agreed">${esc(String(best.consensus_count))} agreed</span>` : ""}
     </div>
     <div class="snippet" style="margin-top:8px"><em>${esc(best.rationale || "")}</em></div>
   </div>`;
 
   if (results.length > 1) {
-    html += `<button class="toggle-btn" onclick="toggleOthers(this)">
-      Show other responses (${results.length - 1})
-    </button>
+    html += `<button class="toggle-btn" onclick="toggleOthers(this)">Show other responses (${results.length - 1})</button>
     <div class="others" id="others">`;
-
     results.slice(1).forEach((r, i) => {
       const pColor = PROVIDER_COLORS[r.provider] || "#6aa9ff";
       html += `<div class="card">
@@ -321,37 +298,31 @@ function render(data) {
         <span class="card-title">${esc(r.title)}</span>
         ${r.sponsored ? `<span class="chip sponsored" style="font-size:11px;margin-left:6px">sponsored</span>` : ""}
         <div class="snippet">${esc(r.snippet || "")}</div>
-        ${safeLink(r.url)}
+        ${safeLink(r.url, "snippet")}
         ${scoreBar(r.score, r.sponsored ? "#b45309" : pColor)}
         <div class="row">
           <span class="chip">score ${esc(String(r.score))}</span>
           <span class="chip" style="background:${pColor}22;color:${pColor}">${esc(r.provider)}</span>
-          ${r.sponsored
-            ? `<span class="chip sponsored">sponsored · penalized</span>`
-            : `<span class="chip good">organic</span>`}
-          ${(r.consensus_count || 0) > 1
-            ? `<span class="chip agreed">${esc(String(r.consensus_count))} agreed</span>`
-            : ""}
+          ${r.sponsored ? `<span class="chip sponsored">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
+          ${(r.consensus_count || 0) > 1 ? `<span class="chip agreed">${esc(String(r.consensus_count))} agreed</span>` : ""}
         </div>
         <div class="snippet"><em>${esc(r.rationale || "")}</em></div>
       </div>`;
     });
-
     html += `</div>`;
   }
 
   out.innerHTML = html;
 }
 
-// Fix #5 — only render http/https URLs as links
-function safeLink(url) {
+// Fix: accept cssClass param so best-card uses "best-snippet" and others use "snippet"
+function safeLink(url, cssClass) {
   if (!url) return "";
-  const safe = /^https?:\/\//i.test(url);
-  if (!safe) return "";
-  return `<div class="best-snippet"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></div>`;
+  if (!/^https?:\/\//i.test(url)) return "";
+  return `<div class="${cssClass}"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a></div>`;
 }
 
-// Fix #6 — clamp pct to 0-100, guard NaN
+// Fix: guard NaN, clamp 0-100
 function scoreBar(score, color) {
   const raw = isFinite(_maxScore) && _maxScore > 0 ? (score / _maxScore) * 100 : 0;
   const pct = Math.max(0, Math.min(100, isFinite(raw) ? Math.round(raw) : 0));
@@ -363,13 +334,11 @@ function scoreBar(score, color) {
   </div>`;
 }
 
-// --- 3D scatter plot ---
+// Fix: use index (i === 0) not title equality for winner detection
 function render3D(results) {
-  // Fix #4 — use index (i === 0) not title equality for winner detection
   const xs = results.map(r => (r.axis_scores || {}).P1_price    || 0.5);
   const ys = results.map(r => (r.axis_scores || {}).P2_distance || 0.5);
   const zs = results.map(r => (r.axis_scores || {}).P3_rating   || 0.5);
-
   const colors  = results.map((r, i) => i === 0 ? "#dc2626" : r.sponsored ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
   const sizes   = results.map((r, i) => i === 0 ? 16 : 10);
   const symbols = results.map((r, i) => i === 0 ? "diamond" : r.sponsored ? "x" : "circle");
@@ -392,8 +361,7 @@ function render3D(results) {
   };
 
   const pointTrace = {
-    x: xs, y: ys, z: zs,
-    text: labels,
+    x: xs, y: ys, z: zs, text: labels,
     mode: "markers+text", type: "scatter3d",
     textposition: "top center",
     textfont: { size: 11, color: "#e8ecf5" },
@@ -433,10 +401,10 @@ function render3D(results) {
   ];
 
   const layout = {
-    margin: {l:0,r:0,b:0,t:40},
-    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-    font: {color:"#93a0b8", size:12},
-    scene: {
+    margin:{l:0,r:0,b:0,t:40},
+    paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)",
+    font:{color:"#93a0b8",size:12},
+    scene:{
       xaxis:{title:"P1 Price score",    backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
       yaxis:{title:"P2 Distance score", backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
       zaxis:{title:"P3 Rating score",   backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
@@ -451,39 +419,34 @@ function render3D(results) {
   Plotly.newPlot("plot-3d", [...lineTraces, penaltyZone, pointTrace, originTrace, ...legendTraces], layout, {responsive:true, displayModeBar:false});
 }
 
-// --- Radar chart ---
 function renderRadar(top3) {
   const axes = ["P1 Price", "P2 Distance", "P3 Rating"];
   const keys = ["P1_price", "P2_distance", "P3_rating"];
-
   const traces = top3.map((r, i) => {
     const vals = keys.map(k => (r.axis_scores || {})[k] || 0);
     vals.push(vals[0]);
     const color = i === 0 ? "#dc2626" : (PROVIDER_COLORS[r.provider] || "#6aa9ff");
     return {
-      type: "scatterpolar", r: vals, theta: [...axes, axes[0]],
-      fill: "toself", fillcolor: color + "30",
-      line: {color, width:2},
-      name: r.title.length > 20 ? r.title.slice(0, 18) + "…" : r.title,
-      hovertemplate: `<b>${esc(r.title)}</b><br>%{theta}: %{r:.2f}<extra></extra>`,
+      type:"scatterpolar", r:vals, theta:[...axes, axes[0]],
+      fill:"toself", fillcolor:color+"30", line:{color, width:2},
+      name: r.title.length > 20 ? r.title.slice(0,18)+"…" : r.title,
+      hovertemplate:`<b>${esc(r.title)}</b><br>%{theta}: %{r:.2f}<extra></extra>`,
     };
   });
-
   Plotly.newPlot("plot-radar", traces, {
-    polar: {
-      bgcolor: "rgba(0,0,0,0)",
-      radialaxis:{visible:true, range:[0,1], color:"#93a0b8", gridcolor:"rgba(255,255,255,0.08)"},
-      angularaxis:{color:"#93a0b8", gridcolor:"rgba(255,255,255,0.08)"},
+    polar:{
+      bgcolor:"rgba(0,0,0,0)",
+      radialaxis:{visible:true,range:[0,1],color:"#93a0b8",gridcolor:"rgba(255,255,255,0.08)"},
+      angularaxis:{color:"#93a0b8",gridcolor:"rgba(255,255,255,0.08)"},
     },
     paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)",
     font:{color:"#93a0b8"},
     legend:{x:0.5,y:-0.1,xanchor:"center",orientation:"h",bgcolor:"rgba(26,32,50,0.9)"},
-    margin:{l:60,r:60,t:40,b:60},
-    showlegend:true,
+    margin:{l:60,r:60,t:40,b:60}, showlegend:true,
   }, {responsive:true, displayModeBar:false});
 }
 
-// Fix #2 — tab switching uses DOM elements not strings for Plotly.Plots.resize
+// Fix: pass DOM elements to Plotly.Plots.resize, not strings
 function switchTab(name, tabEl) {
   document.querySelectorAll(".viz-tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".viz-panel").forEach(p => p.classList.remove("active"));
@@ -494,24 +457,10 @@ function switchTab(name, tabEl) {
   if (name === "radar") Plotly.Plots.resize(document.getElementById("plot-radar"));
 }
 
-// --- Query history ---
-// Fix #1 — use data-query attribute + delegated click listener, no inline onclick injection
-function toggleOthers(btn) {
-  const el = document.getElementById("others");
-  const open = el.classList.toggle("open");
-  const count = (el.querySelectorAll(".card") || []).length;
-  btn.textContent = open
-    ? `Hide other responses (${count})`
-    : `Show other responses (${count})`;
-}
-
-// --- Query history ----------------------------------------------------
+// Fix: use data-query attribute + addEventListener (no inline onclick injection)
 async function toggleHistory() {
   const dropdown = document.getElementById("history-dropdown");
-  if (dropdown.classList.contains("open")) {
-    dropdown.classList.remove("open");
-    return;
-  }
+  if (dropdown.classList.contains("open")) { dropdown.classList.remove("open"); return; }
   try {
     const res = await fetch("/history");
     const data = await res.json();
@@ -525,15 +474,12 @@ async function toggleHistory() {
           <span class="history-cache-badge">cached</span>
         </div>`
       ).join("");
-      // Attach listeners via addEventListener — no inline onclick needed
       dropdown.querySelectorAll(".history-item[data-query]").forEach(el => {
         el.addEventListener("click", () => loadHistory(el.dataset.query));
       });
     }
     dropdown.classList.add("open");
-  } catch (e) {
-    console.error("History fetch failed", e);
-  }
+  } catch (e) { console.error("History fetch failed", e); }
 }
 
 function loadHistory(query) {
