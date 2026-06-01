@@ -376,7 +376,8 @@ function render3D(results) {
   const colors  = results.map((r, i) => i === 0 ? "#dc2626" : r.sponsored ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
   const sizes   = results.map((r, i) => i === 0 ? 16 : 10);
   const symbols = results.map((r, i) => i === 0 ? "diamond" : r.sponsored ? "x" : "circle");
-  const labels  = results.map((r, i) => i === 0 ? `Winner: ${r.title}` : `#${i + 1}: ${r.title}`);
+  // Only label the winner — all results show full detail on hover
+  const labels  = results.map((r, i) => i === 0 ? `Winner` : "");
 
   const lineTraces = results.map((r, i) => ({
     x: [0, xs[i]], y: [0, ys[i]], z: [0, zs[i]],
@@ -398,7 +399,7 @@ function render3D(results) {
     x: xs, y: ys, z: zs, text: labels,
     mode: "markers+text", type: "scatter3d",
     textposition: "top center",
-    textfont: { size: 11, color: "#e8ecf5" },
+    textfont: { size: 12, color: "#dc2626", family: "system-ui, sans-serif" },
     customdata: results.map(r => [
       r.title, r.provider, r.score,
       (r.axis_scores || {}).P1_price    || "—",
