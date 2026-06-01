@@ -184,7 +184,7 @@ class Ranker:
     async def _openai_embed(self, text: str) -> list[float]:
         import httpx, os
         api_key = os.getenv("OPENAI_API_KEY")
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/embeddings",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
