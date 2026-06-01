@@ -35,7 +35,7 @@ from angel_filter.auth import (
 )
 from angel_filter.limits import daily_budget_status, enforce_query_limits
 from angel_filter.orchestrator import Orchestrator
-from angel_filter.providers import DuckDuckGoProvider, MockProvider
+from angel_filter.providers import BraveProvider, GeminiProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
 # Secret used to sign session cookies. MUST be set in production — if it's
 # missing we use a random per-process value so the demo still boots, but
@@ -79,14 +79,47 @@ UPTIME_GAUGE.set(_START_TIME)
 
 
 # --- Build the orchestrator once at import time ---
-# The set of providers the proxy fans out to. MockProvider is kept in the
-# default list so the demo always returns something even if the network is
-# unreliable. Once Google/Bing adapters land, append them here.
 def _build_orchestrator() -> Orchestrator:
-    providers = [
-        DuckDuckGoProvider(),
-        MockProvider(),
-    ]
+    providers = []
+    # Add WatsonX if API key and project ID are present
+    if os.getenv("WATSONX_API_KEY") and os.getenv("WATSONX_PROJECT_ID"):
+        providers.append(WatsonXProvider())
+        logger.info("WatsonXProvider enabled.")
+    else:
+        logger.info("WATSONX_API_KEY or WATSONX_PROJECT_ID not set — WatsonXProvider skipped.")
+
+    # Add Brave if API key is present
+    if os.getenv("BRAVE_API_KEY"):
+        providers.append(BraveProvider())
+        logger.info("BraveProvider enabled.")
+    else:
+        logger.info("BRAVE_API_KEY not set — BraveProvider skipped.")
+
+    # Add OpenAI if API key is present
+    if os.getenv("OPENAI_API_KEY"):
+        providers.append(OpenAIProvider())
+        logger.info("OpenAIProvider enabled.")
+    else:
+        logger.info("OPENAI_API_KEY not set — OpenAIProvider skipped.")
+
+    # Add Gemini if API key is present
+    if os.getenv("GEMINI_API_KEY"):
+        providers.append(GeminiProvider())
+        logger.info("GeminiProvider enabled.")
+    else:
+        logger.info("GEMINI_API_KEY not set — GeminiProvider skipped.")
+
+    # Add Ollama if configured
+    if os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_MODEL"):
+        providers.append(OllamaProvider())
+        logger.info("OllamaProvider enabled.")
+
+    if not providers:
+        raise RuntimeError(
+            "No providers configured. Set at least one of: "
+            "OPENAI_API_KEY, GEMINI_API_KEY, WATSONX_API_KEY, BRAVE_API_KEY, OLLAMA_MODEL"
+        )
+
     return Orchestrator(providers=providers)
 
 
@@ -257,6 +290,12 @@ if _NLIP_AVAILABLE:
         return {
             "providers_used": response.providers_used,
             "providers_failed": response.providers_failed,
+            "intent": response.intent.value,
+            "constraints": {
+                "budget": response.constraints.budget,
+                "max_distance": response.constraints.max_distance,
+                "min_rating": response.constraints.min_rating,
+            },
             "results": [
                 {
                     "title": r.result.title,
@@ -266,6 +305,8 @@ if _NLIP_AVAILABLE:
                     "score": round(r.score, 3),
                     "rationale": r.rationale,
                     "sponsored": r.result.sponsored,
+                    "consensus_count": r.consensus_count,
+                    "axis_scores": r.axis_scores,
                 }
                 for r in response.ranked
             ],
@@ -300,6 +341,10 @@ else:
     )
 
     _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+    if _STATIC_DIR.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     class QueryIn(BaseModel):
         query: str
@@ -374,9 +419,17 @@ else:
             except Exception:
                 QUERY_COUNT.labels(status="error").inc()
                 raise
-        return {
+
+        payload = {
             "providers_used": response.providers_used,
             "providers_failed": response.providers_failed,
+            "intent": response.intent.value,
+            "constraints": {
+                "budget": response.constraints.budget,
+                "max_distance": response.constraints.max_distance,
+                "min_rating": response.constraints.min_rating,
+            },
+            "cached": False,
             "results": [
                 {
                     "title": r.result.title,
@@ -386,10 +439,24 @@ else:
                     "score": round(r.score, 3),
                     "rationale": r.rationale,
                     "sponsored": r.result.sponsored,
+                    "consensus_count": r.consensus_count,
+                    "axis_scores": r.axis_scores,
                 }
                 for r in response.ranked
             ],
         }
+        CACHE.set(body.query, body.preference, {**payload, "cached": True})
+        return payload
+
+    @app.get("/history")
+    async def history():
+        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+
+    @app.post("/cache/clear")
+    async def cache_clear():
+        CACHE._store.clear()
+        CACHE._history.clear()
+        return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
     async def metrics(_user: str = Depends(require_session)):
