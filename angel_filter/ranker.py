@@ -273,27 +273,14 @@ class Ranker:
 
         scored: list[RankedResult] = []
         for i, r in enumerate(results):
-            similarity  = _cosine(pref_vec, embeddings[i])
+            similarity = _cosine(pref_vec, embeddings[i])
             axis_scores = _compute_gap_scores(r, constraints)
-            axis_bonus  = _axis_bonus(axis_scores, intent, _axis_scored_mask(r))
-            c_count     = consensus.get(i, 1)
-            c_factor    = min(c_count - 1, 2) / 2
-            penalty     = SPONSORED_PENALTY if r.sponsored else 0.0
-
-            # Balanced formula: each component has a defined weight
-            final_score = (
-                W_SIMILARITY * similarity
-                + W_AXIS * axis_bonus
-                + W_CONSENSUS * c_factor
-                - penalty
+            c_count = consensus.get(i, 1)
+            rationale = _explain(
+                similarity, axis_scores, intent, c_count, constraints, r.sponsored
             )
-
-            scored.append(RankedResult(
-                result=r,
-                score=round(final_score, 4),
-                rationale=_explain(similarity, axis_scores, intent, c_count, constraints, r.sponsored),
-                axis_scores=axis_scores,
-                consensus_count=c_count,
+            scored.append(_assemble_score(
+                r, similarity, axis_scores, c_count, intent, rationale,
             ))
         return scored
 
@@ -305,41 +292,70 @@ def _score_with_keywords(
     results: list[ProviderResult],
     intent: QueryIntent,
     constraints: QueryConstraints,
-    consensus: dict[str, int],
+    consensus: dict[int, int],
 ) -> list[RankedResult]:
     pref_tokens = _tokens(user_preference)
     scored: list[RankedResult] = []
     for i, r in enumerate(results):
-        haystack    = _tokens(f"{r.title} {r.snippet}")
-        overlap     = len(pref_tokens & haystack)
-        similarity  = overlap / max(len(pref_tokens), 1)
+        haystack = _tokens(f"{r.title} {r.snippet}")
+        overlap = len(pref_tokens & haystack)
+        similarity = overlap / max(len(pref_tokens), 1)
         axis_scores = _compute_gap_scores(r, constraints)
-        axis_bonus  = _axis_bonus(axis_scores, intent, _axis_scored_mask(r))
-        c_count     = consensus.get(i, 1)
-        c_factor    = min(c_count - 1, 2) / 2
-        penalty     = SPONSORED_PENALTY if r.sponsored else 0.0
-
-        final_score = (
-            W_SIMILARITY * similarity
-            + W_AXIS * axis_bonus
-            + W_CONSENSUS * c_factor
-            - penalty
-        )
-
+        c_count = consensus.get(i, 1)
         rationale = (
             f"[keyword fallback] {overlap} terms matched"
             + (f", {intent.value} axis" if intent != QueryIntent.GENERAL else "")
             + (f", {c_count} providers agreed" if c_count > 1 else "")
             + (" — sponsored penalty applied" if r.sponsored else "")
         )
-        scored.append(RankedResult(
-            result=r,
-            score=round(final_score, 4),
-            rationale=rationale,
-            axis_scores=axis_scores,
-            consensus_count=c_count,
+        scored.append(_assemble_score(
+            r, similarity, axis_scores, c_count, intent, rationale,
         ))
     return scored
+
+
+# --- Shared score assembly ----------------------------------------------------
+
+def _assemble_score(
+    r: ProviderResult,
+    similarity: float,
+    axis_scores: dict[str, float],
+    consensus_count: int,
+    intent: QueryIntent,
+    rationale: str,
+) -> RankedResult:
+    """Combine the four scoring components into a RankedResult.
+
+    The embedding and keyword paths differ only in how they compute
+    `similarity` (cosine vs. token overlap) and `rationale`. Everything after
+    that — axis weighting, consensus factor, sponsored penalty, and the final
+    formula — is identical, and lived as two byte-for-byte copies that
+    repeatedly drifted when one was edited and the other missed. This is the
+    single owner of that arithmetic; both paths pass their already-computed
+    similarity and rationale in.
+
+    Final formula (see the module docstring): every term is weight x (0-1
+    value), the three weights sum to 1.0, and the sponsored penalty is
+    subtracted last so an ad is demoted regardless of how well it matches.
+    """
+    axis_bonus = _axis_bonus(axis_scores, intent, _axis_scored_mask(r))
+    c_factor = min(consensus_count - 1, 2) / 2
+    penalty = SPONSORED_PENALTY if r.sponsored else 0.0
+
+    final_score = (
+        W_SIMILARITY * similarity
+        + W_AXIS * axis_bonus
+        + W_CONSENSUS * c_factor
+        - penalty
+    )
+
+    return RankedResult(
+        result=r,
+        score=round(final_score, 4),
+        rationale=rationale,
+        axis_scores=axis_scores,
+        consensus_count=consensus_count,
+    )
 
 
 # --- Hard constraint filtering ------------------------------------------------

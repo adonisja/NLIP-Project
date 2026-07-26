@@ -59,7 +59,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **53 passing** |
+| Tests | **61 passing** |
 
 ---
 
@@ -446,7 +446,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 53 tests should pass.
+All 61 tests should pass.
 
 ---
 
@@ -456,7 +456,7 @@ All 53 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-53 tests covering:
+61 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -477,6 +477,8 @@ python3.12 -m pytest tests/ -v
 - Both scoring loops pass the populated-axis mask (wiring regression guard)
 - Ollama embedding calls yield to the event loop instead of blocking it, and
   run concurrently (N results ≈ one round-trip, not N)
+- Both scoring paths share one final-score formula (`_assemble_score`); the
+  weights, consensus cap, and sponsored penalty are pinned directly
 
 No tests require network or Ollama. `test_orchestrator.py` uses the mock
 provider and the keyword-fallback ranker; `test_ranker_embeddings.py` uses a
@@ -524,6 +526,7 @@ tests/
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
+  test_assemble_score.py     # 8 tests — the shared final-score formula
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md
