@@ -33,6 +33,7 @@ a weight into its own term double-applies it and silently shrinks the signal.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
@@ -108,6 +109,21 @@ class Ranker:
         self.embed_model = embed_model
         self._ollama_available: bool | None = None
         self._openai_available: bool | None = None
+        self._ollama_client = None  # lazily-created ollama.AsyncClient
+
+    def _ollama(self):
+        """Return a cached ollama.AsyncClient, importing lazily.
+
+        Using the async client (not the module-level sync `ollama.embeddings`)
+        is what keeps the embedding calls off the event-loop thread. The sync
+        functions block until the model responds, which would freeze the whole
+        FastAPI server for every other request in flight — see the note in
+        _embed_all_ollama. Subclasses that stub embeddings never call this.
+        """
+        if self._ollama_client is None:
+            import ollama
+            self._ollama_client = ollama.AsyncClient()
+        return self._ollama_client
 
     async def rank(
         self,
@@ -158,8 +174,7 @@ class Ranker:
         if self._ollama_available is not None:
             return self._ollama_available
         try:
-            import ollama
-            ollama.embeddings(model=self.embed_model, prompt="ping")
+            await self._ollama().embeddings(model=self.embed_model, prompt="ping")
             self._ollama_available = True
         except Exception as exc:
             logger.info("Ollama probe failed: %s", exc)
@@ -196,12 +211,23 @@ class Ranker:
     async def _embed_all_ollama(
         self, results: list[ProviderResult]
     ) -> dict[int, list[float]]:
-        import ollama
-        vecs: dict[int, list[float]] = {}
-        for i, r in enumerate(results):
-            text = f"{r.title}. {r.snippet}"
-            vecs[i] = ollama.embeddings(model=self.embed_model, prompt=text)["embedding"]
-        return vecs
+        """Embed every result concurrently via the async Ollama client.
+
+        Two properties matter here:
+          - async client: each call awaits on the network instead of blocking
+            the event-loop thread, so other requests keep being served while
+            Ollama is thinking.
+          - gather: the calls run concurrently rather than one-after-another.
+            Ollama has no batch-embeddings endpoint (unlike OpenAI, see
+            _embed_all_openai), so N results was N sequential round-trips;
+            gather collapses that to roughly one round-trip of wall time.
+        """
+        client = self._ollama()
+        texts = [f"{r.title}. {r.snippet}" for r in results]
+        responses = await asyncio.gather(
+            *(client.embeddings(model=self.embed_model, prompt=t) for t in texts)
+        )
+        return {i: resp["embedding"] for i, resp in enumerate(responses)}
 
     async def _embed_all_openai(
         self, results: list[ProviderResult]
@@ -229,8 +255,8 @@ class Ranker:
         tests/test_ranker_embeddings.py.
         """
         if backend == "ollama":
-            import ollama
-            return ollama.embeddings(model=self.embed_model, prompt=text)["embedding"]
+            resp = await self._ollama().embeddings(model=self.embed_model, prompt=text)
+            return resp["embedding"]
         return await self._openai_embed(text)
 
     async def _score_with_embeddings(

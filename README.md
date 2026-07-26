@@ -59,7 +59,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **47 passing** |
+| Tests | **53 passing** |
 
 ---
 
@@ -446,7 +446,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 47 tests should pass.
+All 53 tests should pass.
 
 ---
 
@@ -456,7 +456,7 @@ All 47 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-47 tests covering:
+53 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -475,12 +475,15 @@ python3.12 -m pytest tests/ -v
 - Axis weights renormalize over populated axes only, and a result cannot win
   the intent axis by omitting it
 - Both scoring loops pass the populated-axis mask (wiring regression guard)
+- Ollama embedding calls yield to the event loop instead of blocking it, and
+  run concurrently (N results ≈ one round-trip, not N)
 
 No tests require network or Ollama. `test_orchestrator.py` uses the mock
 provider and the keyword-fallback ranker; `test_ranker_embeddings.py` uses a
-`StubRanker` that overrides the three embedding seams (`_has_ollama`,
-`_embed_all_ollama`, `_embed_query`) with a canned vector table, so the real
-embedding scoring path runs deterministically and offline.
+`StubRanker` that overrides the embedding seams with a canned vector table;
+`test_ranker_async.py` injects a fake async client whose calls sleep, so the
+non-blocking behaviour can be observed without a real Ollama. All run
+deterministically and offline.
 
 ---
 
@@ -520,6 +523,7 @@ tests/
   test_orchestrator.py       # 23 tests — pipeline, intent, constraints
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
+  test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md
