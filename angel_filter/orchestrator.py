@@ -43,6 +43,8 @@ class Orchestrator:
         user_query: str,
         user_preference: str | None = None,
         top_k: int = 5,
+        user_lat: float | None = None,
+        user_lng: float | None = None,
     ) -> OrchestratorResponse:
         """Run the full pipeline: extract constraints → detect intent → fan out → rank."""
 
@@ -50,6 +52,10 @@ class Orchestrator:
         full_text   = f"{user_query} {user_preference or ''}".strip()
         intent      = detect_intent(full_text)
         constraints = extract_constraints(full_text)
+        # Location comes from the request, not the query text — attach it so
+        # location-aware providers (Google Places) can measure distance.
+        constraints.user_lat = user_lat
+        constraints.user_lng = user_lng
 
         logger.info(
             "Intent: %s | Constraints: budget=%s, distance=%s, rating=%s",

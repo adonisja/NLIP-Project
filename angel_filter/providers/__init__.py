@@ -8,6 +8,7 @@ from angel_filter.providers.base import BaseProvider, ProviderResult
 from angel_filter.providers.brave import BraveProvider
 from angel_filter.providers.duckduckgo import DuckDuckGoProvider
 from angel_filter.providers.gemini import GeminiProvider
+from angel_filter.providers.google_places import GooglePlacesProvider
 from angel_filter.providers.mock import MockProvider
 from angel_filter.providers.ollama_provider import OllamaProvider
 from angel_filter.providers.openai_provider import OpenAIProvider
@@ -19,6 +20,7 @@ __all__ = [
     "BraveProvider",
     "DuckDuckGoProvider",
     "GeminiProvider",
+    "GooglePlacesProvider",
     "MockProvider",
     "OllamaProvider",
     "OpenAIProvider",

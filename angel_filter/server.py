@@ -36,7 +36,7 @@ from angel_filter.auth import (
 from angel_filter.cache import CACHE
 from angel_filter.limits import daily_budget_status, enforce_query_limits
 from angel_filter.orchestrator import Orchestrator
-from angel_filter.providers import BraveProvider, GeminiProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
+from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,14 @@ def _build_orchestrator() -> Orchestrator:
         logger.info("BraveProvider enabled.")
     else:
         logger.info("BRAVE_API_KEY not set — BraveProvider skipped.")
+
+    # Add Google Places if API key is present — the only provider that returns
+    # real distance data (it also needs user lat/lng on each request).
+    if os.getenv("GOOGLE_PLACES_API_KEY"):
+        providers.append(GooglePlacesProvider())
+        logger.info("GooglePlacesProvider enabled.")
+    else:
+        logger.info("GOOGLE_PLACES_API_KEY not set — GooglePlacesProvider skipped.")
 
     # Add OpenAI if API key is present
     if os.getenv("OPENAI_API_KEY"):
@@ -207,6 +215,8 @@ if _NLIP_AVAILABLE:
     class QueryIn(BaseModel):
         query: str
         preference: str | None = None
+        lat: float | None = None   # user origin latitude (for distance-aware providers)
+        lng: float | None = None   # user origin longitude
 
     @app.get("/")
     async def index(request: Request):
@@ -280,6 +290,8 @@ if _NLIP_AVAILABLE:
                 response = await ORCHESTRATOR.handle_query(
                     user_query=body.query,
                     user_preference=body.preference,
+                    user_lat=body.lat,
+                    user_lng=body.lng,
                 )
                 QUERY_COUNT.labels(status="success").inc()
                 for r in response.ranked:
@@ -350,6 +362,8 @@ else:
     class QueryIn(BaseModel):
         query: str
         preference: str | None = None
+        lat: float | None = None   # user origin latitude (for distance-aware providers)
+        lng: float | None = None   # user origin longitude
 
     @app.get("/")
     async def index(request: Request):
@@ -409,8 +423,12 @@ else:
     async def query(body: QueryIn, _user: str = Depends(enforce_query_limits)):
         from fastapi import HTTPException as _HTTPException
 
+        # Fold location into the cache's preference component so two users at
+        # different coordinates don't get served each other's distance results.
+        cache_pref = _cache_pref(body.preference, body.lat, body.lng)
+
         # Return cached result if fresh
-        cached = CACHE.get(body.query, body.preference)
+        cached = CACHE.get(body.query, cache_pref)
         if cached:
             logger.info("Cache hit for query: %r", body.query)
             return cached
@@ -420,6 +438,8 @@ else:
                 response = await ORCHESTRATOR.handle_query(
                     user_query=body.query,
                     user_preference=body.preference,
+                    user_lat=body.lat,
+                    user_lng=body.lng,
                 )
                 QUERY_COUNT.labels(status="success").inc()
                 for r in response.ranked:
@@ -458,7 +478,7 @@ else:
                 for r in response.ranked
             ],
         }
-        CACHE.set(body.query, body.preference, {**payload, "cached": True})
+        CACHE.set(body.query, cache_pref, {**payload, "cached": True})
         return payload
 
     @app.get("/history")
@@ -477,6 +497,19 @@ else:
 
 
 # --- Helpers ------------------------------------------------------------------
+
+def _cache_pref(preference: str | None, lat: float | None, lng: float | None) -> str:
+    """Compose the cache's preference key so location is part of the identity.
+
+    The cache keys on (query, preference); results now depend on the user's
+    coordinates too, so we fold them in. Coordinates are rounded to ~3 decimal
+    places (~110m) so trivially different GPS readings still hit the cache.
+    """
+    base = preference or ""
+    if lat is None or lng is None:
+        return base
+    return f"{base}|@{round(lat, 3)},{round(lng, 3)}"
+
 
 def _format_reply(response) -> str:
     if not response.ranked:

@@ -203,6 +203,98 @@ async def test_consensus_bonus_applied_when_two_providers_agree():
 
 
 # ---------------------------------------------------------------------------
+# Location-aware distance (real P2 data)
+# ---------------------------------------------------------------------------
+
+class GeoMockProvider(MockProvider):
+    """A location-aware provider for end-to-end distance tests.
+
+    Stands in for Google Places: it reads the user's coordinates off the
+    constraints (as a real location provider does) and returns venues whose
+    `distance` is computed from them. This is what lets us prove the P2 axis
+    actually discriminates once *some* provider supplies real distance —
+    the AI providers never do.
+    """
+
+    async def query(self, user_query, max_results=10, constraints=None):
+        from angel_filter.providers.base import ProviderError, ProviderResult
+        from angel_filter.providers.google_places import haversine_miles
+
+        # Match the real GooglePlacesProvider's contract: raise (not return [])
+        # when there's no location, so the orchestrator exercises the same
+        # skip/failed accounting path it would in production.
+        if constraints is None or constraints.user_lat is None or constraints.user_lng is None:
+            raise ProviderError("no user location supplied; skipping location provider")
+        lat, lng = constraints.user_lat, constraints.user_lng
+        # Two venues: "Near" a block away, "Far" a couple miles south.
+        venues = [
+            ("Near Cafe", 40.7682, -73.9820),
+            ("Far Cafe",  40.7305, -74.0026),
+        ]
+        return [
+            ProviderResult(
+                title=name, snippet="lunch", provider=self.name,
+                distance=round(haversine_miles(lat, lng, vlat, vlng), 2),
+                rating=4.3, price=12.0,
+            )
+            for name, vlat, vlng in venues
+        ]
+
+
+@pytest.mark.asyncio
+async def test_location_flows_through_to_provider_and_ranks_by_distance():
+    """user_lat/user_lng on handle_query must reach the provider and drive P2.
+
+    Proves the whole chain: request coords -> constraints -> location provider
+    -> real distance -> P2 axis actually separates near from far on a DISTANCE
+    query. Without a location provider P2 is a constant 0.5 and this can't work.
+    """
+    orch = Orchestrator(providers=[GeoMockProvider(name="geo")])
+    orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False
+
+    response = await orch.handle_query(
+        user_query="nearest lunch nearby",
+        top_k=5,
+        user_lat=40.7680,
+        user_lng=-73.9819,
+    )
+
+    assert response.intent == QueryIntent.DISTANCE
+    assert response.constraints.user_lat == 40.7680
+    titles = [r.result.title for r in response.ranked]
+    assert titles[0] == "Near Cafe", (
+        f"expected the closer venue first on a distance query, got {titles}"
+    )
+    # P2 must actually differ between the two — not the neutral 0.5 for both.
+    near = next(r for r in response.ranked if r.result.title == "Near Cafe")
+    far = next(r for r in response.ranked if r.result.title == "Far Cafe")
+    assert near.axis_scores["P2_distance"] > far.axis_scores["P2_distance"]
+
+
+@pytest.mark.asyncio
+async def test_location_provider_skipped_when_no_coords():
+    """With no user location, the geo provider returns nothing and is 'used' but empty.
+
+    The pipeline must still succeed on whatever other providers return — here
+    the plain MockProvider carries the query.
+    """
+    orch = Orchestrator(providers=[GeoMockProvider(name="geo"), MockProvider()])
+    orch.ranker._ollama_available = False
+    orch.ranker._openai_available = False
+
+    response = await orch.handle_query(user_query="pizza lunch")  # no coords
+
+    assert response.ranked, "pipeline should still return results from other providers"
+    # The geo provider raised (no coords) -> it must be accounted as failed,
+    # not used. Asserting this catches an orchestrator accounting regression,
+    # which the provider-tag check alone would not.
+    assert "geo" in response.providers_failed
+    assert "geo" not in response.providers_used
+    assert all(r.result.provider != "geo" for r in response.ranked)
+
+
+# ---------------------------------------------------------------------------
 # Intent detection unit tests
 # ---------------------------------------------------------------------------
 
