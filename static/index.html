@@ -193,6 +193,21 @@ logoutBtn.addEventListener("click", async () => {
   }
 });
 
+// Best-effort browser geolocation. Resolves to {lat, lng} when the user grants
+// permission, or null on denial / no support / timeout. Never rejects: distance
+// is a bonus signal, so a missing location must never block a search — the
+// backend's Google Places provider simply skips itself when no coords arrive.
+function getUserLocation() {
+  return new Promise((resolve) => {
+    if (!("geolocation" in navigator)) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()    => resolve(null),   // denied, unavailable, or timed out
+      { timeout: 8000, maximumAge: 300000 },  // 8s cap; reuse a fix up to 5 min old
+    );
+  });
+}
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const query      = document.getElementById("q").value.trim();
@@ -205,10 +220,18 @@ form.addEventListener("submit", async (e) => {
   out.innerHTML = `<div class="meta">Querying providers…</div>`;
 
   try {
+    // Ask for location before firing the query. Resolves to null if the user
+    // declines — we then send no coords and distance scoring stays neutral.
+    const loc = await getUserLocation();
+
     const res = await fetch("/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query, preference }),
+      body: JSON.stringify({
+        query,
+        preference,
+        ...(loc ? { lat: loc.lat, lng: loc.lng } : {}),
+      }),
     });
     if (res.status === 401) { location.href = "/login"; return; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
