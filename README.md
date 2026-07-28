@@ -38,6 +38,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Provider: Ollama (`llama3.2`) | **Working** — runs locally, no key needed |
 | Provider: WatsonX (`granite-13b-instruct-v2`) | **Working** — needs `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` |
 | Provider: Brave Search | **Ready** — needs `BRAVE_API_KEY` |
+| Provider: Google Places (real distance) | **Working** — needs `GOOGLE_PLACES_API_KEY` + user lat/lng |
 | Provider: Mock (canned lunch data for tests) | **Working** (tests only, not in server build) |
 | Orchestrator (parallel fan-out, failure isolation) | **Working** |
 | Constraint extraction (`$15`, `within 1 mile`, `4 stars`) | **Working** |
@@ -59,7 +60,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **61 passing** |
+| Tests | **73 passing** |
 
 ---
 
@@ -169,9 +170,12 @@ scores 0.0, so the two thresholds agree by construction.
 **Missing data is not mediocre data.** Providers disclose different fields: AI
 providers (OpenAI, Gemini, Ollama, WatsonX) return price and rating but never
 distance — they have no location context and would fabricate it — and Brave
-returns no structured fields at all. Scoring an absent axis as a neutral 0.5
-would let a bare search result with no data land within 0.11 of a result that
-satisfies every constraint, which is less than the 0.20 sponsored penalty.
+returns no structured fields at all. The **Google Places** provider is the one
+source of real distance: given the user's coordinates it returns nearby venues
+and computes each one's distance, so P2 actually discriminates on a "nearest"
+query. Scoring an absent axis as a neutral 0.5 would let a bare search result
+with no data land within 0.11 of a result that satisfies every constraint,
+which is less than the 0.20 sponsored penalty.
 
 So the axis weights are **renormalised over whichever axes actually have
 data**: a result with price and rating but no distance is judged on price and
@@ -390,7 +394,13 @@ You need **at least one** of the following. The server auto-detects which keys a
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) | Free trial credits |
 | WatsonX | `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` | [cloud.ibm.com](https://cloud.ibm.com) | Free tier available |
 | Brave Search | `BRAVE_API_KEY` | [api.search.brave.com](https://api.search.brave.com) | 2,000 free queries/month |
+| Google Places | `GOOGLE_PLACES_API_KEY` | [console.cloud.google.com](https://console.cloud.google.com) | Billing applies (has free monthly credit) |
 | Ollama | *(no key needed)* | Runs locally after install | Free |
+
+> Google Places is the only provider that returns real distance. It also needs
+> the user's coordinates, sent as `lat` / `lng` in the `POST /query` body — the
+> browser's geolocation prompt supplies these (frontend). Without coordinates
+> the provider is skipped and distance ranking falls back to neutral.
 
 Create a `.env` file in the project root with your keys:
 
@@ -410,6 +420,7 @@ OLLAMA_MODEL=llama3.2:latest
 
 # Optional
 BRAVE_API_KEY=your-key-here
+GOOGLE_PLACES_API_KEY=your-key-here   # real distance; needs lat/lng per request
 ```
 
 > **Never commit your `.env` file.** It is already listed in `.gitignore`.
@@ -446,7 +457,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 61 tests should pass.
+All 73 tests should pass.
 
 ---
 
@@ -456,7 +467,7 @@ All 61 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-61 tests covering:
+73 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -479,6 +490,8 @@ python3.12 -m pytest tests/ -v
   run concurrently (N results ≈ one round-trip, not N)
 - Both scoring paths share one final-score formula (`_assemble_score`); the
   weights, consensus cap, and sponsored penalty are pinned directly
+- Google Places maps venues to real distances (haversine); user coordinates
+  flow request → constraints → provider → a discriminating P2 axis
 
 No tests require network or Ollama. `test_orchestrator.py` uses the mock
 provider and the keyword-fallback ranker; `test_ranker_embeddings.py` uses a
@@ -517,16 +530,18 @@ angel_filter/
     ollama_provider.py  # Local Ollama (llama3.2)
     watsonx.py          # IBM WatsonX
     brave.py            # Brave Search API
+    google_places.py    # Google Places — real distance (needs user lat/lng)
     mock.py             # canned lunch data (tests only)
 static/
   index.html            # demo UI (results + 3D plot + radar chart)
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
-  test_orchestrator.py       # 23 tests — pipeline, intent, constraints
+  test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
   test_assemble_score.py     # 8 tests — the shared final-score formula
+  test_google_places.py      # 10 tests — Google Places provider + haversine
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md

@@ -22,10 +22,18 @@ class QueryConstraints:
 
     None means the user didn't specify that constraint — the ranker will
     use neutral scoring for that axis rather than a real gap.
+
+    user_lat / user_lng are the origin a location-aware provider (e.g. Google
+    Places) measures distance from. They come from the request, not from
+    parsing the query text — the user's coordinates aren't something you can
+    extract from "lunch nearby". Providers with no notion of location ignore
+    them; providers that need them and don't get them return no distance.
     """
     budget: float | None = None        # P1 — maximum price the user will pay
     max_distance: float | None = None  # P2 — maximum distance in miles
     min_rating: float | None = None    # P3 — minimum acceptable star rating
+    user_lat: float | None = None      # request-supplied origin latitude
+    user_lng: float | None = None      # request-supplied origin longitude
 
 
 # --- Regex patterns -----------------------------------------------------------
