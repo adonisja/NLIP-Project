@@ -14,23 +14,28 @@ Scoring has four layers, applied in order:
      Gaps are normalised to 0-1 and weighted by the detected intent axis.
 
   3. Fuzzy consensus — candidates mentioned by multiple providers are boosted.
-     Matching uses token overlap AND (when Ollama is available) embedding
-     distance, so "Joe's Pizza" and "Joe Pizza" cluster together.
+     With an embedding backend, matching clusters on embedding distance so
+     "Joe's Pizza" and "Joe Pizza" group together; the keyword fallback
+     matches on normalised title instead. Capped at 2 extra providers.
 
   4. Sponsored penalty — explicit deduction for any ad-flagged result.
 
 Final score:
-    score = semantic_similarity
-            + (AXIS_WEIGHT  * axis_score)
-            + (CONSENSUS_BONUS * extra_providers)
+    score = (W_SIMILARITY * similarity)     # similarity  in 0-1
+            + (W_AXIS      * axis_score)    # axis_score  in 0-1
+            + (W_CONSENSUS * c_factor)      # c_factor    in 0-1
             - (SPONSORED_PENALTY if sponsored)
+
+Every term is weight x (value in 0-1), and the three weights sum to 1.0, so
+an unsponsored result scores in 0-1. Keep that invariant when tuning: folding
+a weight into its own term double-applies it and silently shrinks the signal.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
-from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -47,12 +52,8 @@ W_AXIS: float        = 0.35   # axis score contribution (split across all 3 axes
 W_CONSENSUS: float   = 0.15   # consensus contribution (capped)
 
 SPONSORED_PENALTY: float = 0.20   # raised — ads should be clearly demoted
-CONSENSUS_BONUS: float   = 0.075  # per extra provider; capped at 2 providers max
 FUZZY_THRESHOLD: float   = 0.75   # embedding similarity above which two titles cluster
 DEFAULT_EMBED_MODEL: str = "nomic-embed-text"
-
-# Keep for backwards-compat in tests that reference AXIS_WEIGHT
-AXIS_WEIGHT: float = W_AXIS
 
 
 # --- Query intent -------------------------------------------------------------
@@ -108,6 +109,21 @@ class Ranker:
         self.embed_model = embed_model
         self._ollama_available: bool | None = None
         self._openai_available: bool | None = None
+        self._ollama_client = None  # lazily-created ollama.AsyncClient
+
+    def _ollama(self):
+        """Return a cached ollama.AsyncClient, importing lazily.
+
+        Using the async client (not the module-level sync `ollama.embeddings`)
+        is what keeps the embedding calls off the event-loop thread. The sync
+        functions block until the model responds, which would freeze the whole
+        FastAPI server for every other request in flight — see the note in
+        _embed_all_ollama. Subclasses that stub embeddings never call this.
+        """
+        if self._ollama_client is None:
+            import ollama
+            self._ollama_client = ollama.AsyncClient()
+        return self._ollama_client
 
     async def rank(
         self,
@@ -158,8 +174,7 @@ class Ranker:
         if self._ollama_available is not None:
             return self._ollama_available
         try:
-            import ollama
-            ollama.embeddings(model=self.embed_model, prompt="ping")
+            await self._ollama().embeddings(model=self.embed_model, prompt="ping")
             self._ollama_available = True
         except Exception as exc:
             logger.info("Ollama probe failed: %s", exc)
@@ -196,12 +211,23 @@ class Ranker:
     async def _embed_all_ollama(
         self, results: list[ProviderResult]
     ) -> dict[int, list[float]]:
-        import ollama
-        vecs: dict[int, list[float]] = {}
-        for i, r in enumerate(results):
-            text = f"{r.title}. {r.snippet}"
-            vecs[i] = ollama.embeddings(model=self.embed_model, prompt=text)["embedding"]
-        return vecs
+        """Embed every result concurrently via the async Ollama client.
+
+        Two properties matter here:
+          - async client: each call awaits on the network instead of blocking
+            the event-loop thread, so other requests keep being served while
+            Ollama is thinking.
+          - gather: the calls run concurrently rather than one-after-another.
+            Ollama has no batch-embeddings endpoint (unlike OpenAI, see
+            _embed_all_openai), so N results was N sequential round-trips;
+            gather collapses that to roughly one round-trip of wall time.
+        """
+        client = self._ollama()
+        texts = [f"{r.title}. {r.snippet}" for r in results]
+        responses = await asyncio.gather(
+            *(client.embeddings(model=self.embed_model, prompt=t) for t in texts)
+        )
+        return {i: resp["embedding"] for i, resp in enumerate(responses)}
 
     async def _embed_all_openai(
         self, results: list[ProviderResult]
@@ -221,48 +247,40 @@ class Ranker:
             # API returns embeddings in the same order as input
             return {i: item["embedding"] for i, item in enumerate(data)}
 
+    async def _embed_query(self, text: str, backend: str = "ollama") -> list[float]:
+        """Embed the user's preference text with whichever backend is active.
+
+        Split out from _score_with_embeddings so tests can stub the embedding
+        source without reaching into scoring logic. See StubRanker in
+        tests/test_ranker_embeddings.py.
+        """
+        if backend == "ollama":
+            resp = await self._ollama().embeddings(model=self.embed_model, prompt=text)
+            return resp["embedding"]
+        return await self._openai_embed(text)
+
     async def _score_with_embeddings(
         self,
         user_preference: str,
         results: list[ProviderResult],
         intent: QueryIntent,
         constraints: QueryConstraints,
-        consensus: dict[str, int],
+        consensus: dict[int, int],
         embeddings: dict[int, list[float]],
         backend: str = "ollama",
     ) -> list[RankedResult]:
-        if backend == "ollama":
-            import ollama
-            pref_vec = ollama.embeddings(
-                model=self.embed_model, prompt=user_preference
-            )["embedding"]
-        else:
-            pref_vec = await self._openai_embed(user_preference)
+        pref_vec = await self._embed_query(user_preference, backend)
 
         scored: list[RankedResult] = []
         for i, r in enumerate(results):
-            similarity  = _cosine(pref_vec, embeddings[i])
+            similarity = _cosine(pref_vec, embeddings[i])
             axis_scores = _compute_gap_scores(r, constraints)
-            axis_bonus  = _axis_bonus(axis_scores, intent)
-            c_count     = consensus.get(_normalise(r.title), 1)
-            # Cap consensus at 2 extra providers to prevent gang-up effect
-            c_bonus     = CONSENSUS_BONUS * min(c_count - 1, 2)
-            penalty     = SPONSORED_PENALTY if r.sponsored else 0.0
-
-            # Balanced formula: each component has a defined weight
-            final_score = (
-                W_SIMILARITY * similarity
-                + W_AXIS * axis_bonus
-                + W_CONSENSUS * c_bonus
-                - penalty
+            c_count = consensus.get(i, 1)
+            rationale = _explain(
+                similarity, axis_scores, intent, c_count, constraints, r.sponsored
             )
-
-            scored.append(RankedResult(
-                result=r,
-                score=round(final_score, 4),
-                rationale=_explain(similarity, axis_scores, intent, c_count, constraints, r.sponsored),
-                axis_scores=axis_scores,
-                consensus_count=c_count,
+            scored.append(_assemble_score(
+                r, similarity, axis_scores, c_count, intent, rationale,
             ))
         return scored
 
@@ -274,41 +292,70 @@ def _score_with_keywords(
     results: list[ProviderResult],
     intent: QueryIntent,
     constraints: QueryConstraints,
-    consensus: dict[str, int],
+    consensus: dict[int, int],
 ) -> list[RankedResult]:
     pref_tokens = _tokens(user_preference)
     scored: list[RankedResult] = []
-    for r in results:
-        haystack    = _tokens(f"{r.title} {r.snippet}")
-        overlap     = len(pref_tokens & haystack)
-        similarity  = overlap / max(len(pref_tokens), 1)
+    for i, r in enumerate(results):
+        haystack = _tokens(f"{r.title} {r.snippet}")
+        overlap = len(pref_tokens & haystack)
+        similarity = overlap / max(len(pref_tokens), 1)
         axis_scores = _compute_gap_scores(r, constraints)
-        axis_bonus  = _axis_bonus(axis_scores, intent)
-        c_count     = consensus.get(_normalise(r.title), 1)
-        c_bonus     = CONSENSUS_BONUS * min(c_count - 1, 2)
-        penalty     = SPONSORED_PENALTY if r.sponsored else 0.0
-
-        final_score = (
-            W_SIMILARITY * similarity
-            + W_AXIS * axis_bonus
-            + W_CONSENSUS * c_bonus
-            - penalty
-        )
-
+        c_count = consensus.get(i, 1)
         rationale = (
             f"[keyword fallback] {overlap} terms matched"
             + (f", {intent.value} axis" if intent != QueryIntent.GENERAL else "")
             + (f", {c_count} providers agreed" if c_count > 1 else "")
             + (" — sponsored penalty applied" if r.sponsored else "")
         )
-        scored.append(RankedResult(
-            result=r,
-            score=round(final_score, 4),
-            rationale=rationale,
-            axis_scores=axis_scores,
-            consensus_count=c_count,
+        scored.append(_assemble_score(
+            r, similarity, axis_scores, c_count, intent, rationale,
         ))
     return scored
+
+
+# --- Shared score assembly ----------------------------------------------------
+
+def _assemble_score(
+    r: ProviderResult,
+    similarity: float,
+    axis_scores: dict[str, float],
+    consensus_count: int,
+    intent: QueryIntent,
+    rationale: str,
+) -> RankedResult:
+    """Combine the four scoring components into a RankedResult.
+
+    The embedding and keyword paths differ only in how they compute
+    `similarity` (cosine vs. token overlap) and `rationale`. Everything after
+    that — axis weighting, consensus factor, sponsored penalty, and the final
+    formula — is identical, and lived as two byte-for-byte copies that
+    repeatedly drifted when one was edited and the other missed. This is the
+    single owner of that arithmetic; both paths pass their already-computed
+    similarity and rationale in.
+
+    Final formula (see the module docstring): every term is weight x (0-1
+    value), the three weights sum to 1.0, and the sponsored penalty is
+    subtracted last so an ad is demoted regardless of how well it matches.
+    """
+    axis_bonus = _axis_bonus(axis_scores, intent, _axis_scored_mask(r))
+    c_factor = min(consensus_count - 1, 2) / 2
+    penalty = SPONSORED_PENALTY if r.sponsored else 0.0
+
+    final_score = (
+        W_SIMILARITY * similarity
+        + W_AXIS * axis_bonus
+        + W_CONSENSUS * c_factor
+        - penalty
+    )
+
+    return RankedResult(
+        result=r,
+        score=round(final_score, 4),
+        rationale=rationale,
+        axis_scores=axis_scores,
+        consensus_count=consensus_count,
+    )
 
 
 # --- Hard constraint filtering ------------------------------------------------
@@ -351,8 +398,12 @@ def _compute_gap_scores(r: ProviderResult, c: QueryConstraints) -> dict[str, flo
     We map gap → score so that meeting the constraint gives 1.0 and badly
     missing it gives 0.0.
 
-    When no constraint is set for an axis, score is neutral 0.5.
-    When the candidate has no data for an axis, score is neutral 0.5.
+    When no constraint is set for an axis but the candidate has data, we score
+    the raw value on an absolute scale. When the candidate has NO data for an
+    axis, the score is a neutral 0.5 placeholder — but _axis_scored_mask()
+    reports that axis as unscored so _axis_bonus() can drop it from the
+    weighted average instead of averaging the placeholder in. See the note in
+    _axis_bonus about why "missing" must not mean "mediocre".
     """
 
     # P1 — Price: lower is better
@@ -379,7 +430,11 @@ def _compute_gap_scores(r: ProviderResult, c: QueryConstraints) -> dict[str, flo
     # P3 — Rating: higher is better
     if c.min_rating is not None and r.rating is not None:
         gap = c.min_rating - r.rating      # negative = meets or exceeds threshold
-        p3 = max(0.0, min(1.0, 0.75 + (gap / -5.0) * 0.25)) if gap <= 0 else max(0.0, 0.75 - gap * 0.25)
+        if gap <= 0:
+            headroom = max(5.0 - c.min_rating, 0.1)
+            p3 = 0.6 + 0.4 * min(-gap / headroom, 1.0)
+        else:
+            p3 = max(0.0, 0.6 - gap * 1.2)
     elif r.rating is not None:
         p3 = r.rating / 5.0
     else:
@@ -392,30 +447,103 @@ def _compute_gap_scores(r: ProviderResult, c: QueryConstraints) -> dict[str, flo
     }
 
 
-def _axis_bonus(axis_scores: dict[str, float], intent: QueryIntent) -> float:
-    """Compute weighted axis score — all three axes always contribute.
+def _axis_scored_mask(r: ProviderResult) -> dict[str, bool]:
+    """Report which axes the candidate actually has data for.
 
-    Intent shifts the weights so the dominant axis gets more influence,
-    but the other two axes still count. This handles "cheap AND nearby"
-    queries correctly instead of winner-take-all on a single axis.
+    An axis is scoreable only when the provider supplied a value. This is not
+    a detail: AI providers (OpenAI, Gemini, Ollama, WatsonX) never return
+    distance — they have no location context and prompt.py deliberately forbids
+    them from inventing one — and search providers like Brave return no
+    structured fields at all.
+    """
+    return {
+        "P1_price":    r.price is not None,
+        "P2_distance": r.distance is not None,
+        "P3_rating":   r.rating is not None,
+    }
 
-    Weights per intent (dominant / secondary / tertiary):
+
+# Intent → per-axis weight. Weights are renormalised over whichever axes have
+# data, so these are ratios rather than absolute shares.
+_INTENT_AXIS_WEIGHTS: dict[QueryIntent, dict[str, float]] = {
+    QueryIntent.PRICE:    {"P1_price": 0.60, "P2_distance": 0.20, "P3_rating": 0.20},
+    QueryIntent.DISTANCE: {"P1_price": 0.20, "P2_distance": 0.60, "P3_rating": 0.20},
+    QueryIntent.RATING:   {"P1_price": 0.20, "P2_distance": 0.20, "P3_rating": 0.60},
+    QueryIntent.GENERAL:  {"P1_price": 1 / 3, "P2_distance": 1 / 3, "P3_rating": 1 / 3},
+}
+
+# The axis each intent is "about". GENERAL has no dominant axis, so it is
+# absent here and renormalises freely across whatever data exists.
+_INTENT_AXIS: dict[QueryIntent, str] = {
+    QueryIntent.PRICE:    "P1_price",
+    QueryIntent.DISTANCE: "P2_distance",
+    QueryIntent.RATING:   "P3_rating",
+}
+
+
+def _axis_bonus(
+    axis_scores: dict[str, float],
+    intent: QueryIntent,
+    scored: dict[str, bool] | None = None,
+) -> float:
+    """Weighted axis score over the axes that actually have data.
+
+    Intent shifts the weights so the dominant axis gets more influence, but
+    the other axes still count. This handles "cheap AND nearby" queries
+    correctly instead of winner-take-all on a single axis.
+
+    Base weights per intent (dominant / secondary / tertiary):
       PRICE:    60% / 20% / 20%
       DISTANCE: 60% / 20% / 20%
       RATING:   60% / 20% / 20%
       GENERAL:  33% / 33% / 33%
-    """
-    p1 = axis_scores["P1_price"]
-    p2 = axis_scores["P2_distance"]
-    p3 = axis_scores["P3_rating"]
 
-    if intent == QueryIntent.PRICE:
-        return 0.60 * p1 + 0.20 * p2 + 0.20 * p3
-    if intent == QueryIntent.DISTANCE:
-        return 0.20 * p1 + 0.60 * p2 + 0.20 * p3
-    if intent == QueryIntent.RATING:
-        return 0.20 * p1 + 0.20 * p2 + 0.60 * p3
-    return (p1 + p2 + p3) / 3
+    `scored` marks which axes have real data. Weights are renormalised over
+    only those axes, so a result with price and rating but no distance is
+    judged on price and rating alone rather than being pulled toward the
+    neutral 0.5 placeholder.
+
+    Why this matters: treating "no data" as a mediocre 0.5 lets a bare search
+    link with no structured fields score 0.50 on every axis, landing within
+    ~0.11 of a result that perfectly satisfies every constraint — less than
+    the 0.20 sponsored penalty. Missing data must not be scoreable as
+    mediocrity, or the axis system rewards providers for telling us nothing.
+
+    Renormalisation alone would over-reward silence on the axis the user
+    actually asked about: on a DISTANCE query, a result with no distance would
+    have its 60% redistributed onto price and rating, letting it beat a result
+    that really is 0.05 mi away. So when the intent axis itself is unscored we
+    substitute a neutral 0.5 for it and keep its weight in the denominator.
+    The result is judged on what it disclosed, but it cannot win the axis it
+    stayed silent on.
+
+    When no axis has data, there is nothing to rank on and we return the
+    neutral 0.5. `scored=None` scores all three axes, preserving the old
+    behaviour for callers that have no ProviderResult to inspect.
+    """
+    weights = _INTENT_AXIS_WEIGHTS[intent]
+
+    if scored is None:
+        scored = {axis: True for axis in weights}
+
+    if not any(scored.get(axis) for axis in weights):
+        return 0.5
+
+    intent_axis = _INTENT_AXIS.get(intent)
+
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for axis, w in weights.items():
+        if scored.get(axis):
+            weighted_sum += w * axis_scores[axis]
+            total_weight += w
+        elif axis == intent_axis:
+            # Unscored intent axis: neutral value, weight retained so the
+            # silence is not converted into credit on the other axes.
+            weighted_sum += w * 0.5
+            total_weight += w
+
+    return weighted_sum / total_weight if total_weight else 0.5
 
 
 # --- Fuzzy consensus clustering -----------------------------------------------
@@ -424,7 +552,7 @@ def _build_fuzzy_consensus(
     results: list[ProviderResult],
     embeddings: dict[int, list[float]],
     threshold: float,
-) -> dict[str, int]:
+) -> dict[int, int]:
     """Cluster results by embedding similarity, then count providers per cluster.
 
     Two results are in the same cluster if their embeddings are above
@@ -458,23 +586,18 @@ def _build_fuzzy_consensus(
         cluster_providers.setdefault(root, set()).add(r.provider)
 
     # Map each normalised title to the provider count of its cluster
-    counts: dict[str, int] = {}
+    counts: dict[int, int] = {}
     for i, r in enumerate(results):
-        root = find(i)
-        counts[_normalise(r.title)] = len(cluster_providers[root])
+        counts[i] = len(cluster_providers[find(i)])
     return counts
 
 
-def _build_token_consensus(results: list[ProviderResult]) -> dict[str, int]:
+def _build_token_consensus(results: list[ProviderResult]) -> dict[int, int]:
     """Fallback consensus: simple normalised-title exact match across providers."""
-    seen: set[tuple[str, str]] = set()
-    counts: Counter[str] = Counter()
+    providers_by_title: dict[str,set[str]] = {}
     for r in results:
-        key = (_normalise(r.title), r.provider)
-        if key not in seen:
-            seen.add(key)
-            counts[_normalise(r.title)] += 1
-    return dict(counts)
+        providers_by_title.setdefault(_normalise(r.title), set()).add(r.provider)
+    return {i: len(providers_by_title[_normalise(r.title)]) for i, r in enumerate(results)}
 
 
 # --- Maths & helpers ----------------------------------------------------------

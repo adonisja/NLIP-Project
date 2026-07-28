@@ -45,6 +45,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Ranker — semantic similarity (Ollama embeddings) | **Working** |
 | Ranker — three-axis gap scoring (P1/P2/P3) | **Working** |
 | Ranker — multi-intent axis weighting | **Working** |
+| Ranker — missing-data axis renormalization | **Working** |
 | Ranker — hard constraint filtering | **Working** |
 | Ranker — fuzzy consensus clustering | **Working** |
 | Ranker — sponsored content penalty | **Working** |
@@ -58,7 +59,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **23 passing** |
+| Tests | **61 passing** |
 
 ---
 
@@ -151,19 +152,47 @@ prompts and the ranker:
 | P2 Distance | `within 1 mile` | `candidate.distance - max_distance` (negative = closer) |
 | P3 Rating | `rated 4 stars` | `min_rating - candidate.rating` (negative = meets threshold) |
 
-Each gap maps to a 0–1 score. Intent detection (price / distance / rating /
-general) shifts the axis weights — a price query gives P1 60% of the axis
-score, with P2 and P3 splitting the remaining 40%. All three axes always
-contribute — no winner-take-all.
+Each gap maps to a 0–1 score, scaled so that meeting a constraint scores well
+and beating it scores better. With `rated at least 4 stars`, for example, a
+4.0★ result scores 0.60 on P3 and a 5.0★ result scores 1.00 — the axis stays
+useful for ranking *within* the set of results that satisfy the constraint.
+
+Intent detection (price / distance / rating / general) shifts the axis weights
+— a price query gives P1 60% of the axis score, with P2 and P3 splitting the
+remaining 40%. All three axes always contribute — no winner-take-all.
 
 Hard constraint filtering removes results that are more than 25% over budget
-or more than 0.5★ below the minimum rating before scoring begins.
+or more than 0.5★ below the minimum rating before scoring begins. The P3 scale
+is anchored to that same 0.5★ cutoff: a result exactly at the filter boundary
+scores 0.0, so the two thresholds agree by construction.
+
+**Missing data is not mediocre data.** Providers disclose different fields: AI
+providers (OpenAI, Gemini, Ollama, WatsonX) return price and rating but never
+distance — they have no location context and would fabricate it — and Brave
+returns no structured fields at all. Scoring an absent axis as a neutral 0.5
+would let a bare search result with no data land within 0.11 of a result that
+satisfies every constraint, which is less than the 0.20 sponsored penalty.
+
+So the axis weights are **renormalised over whichever axes actually have
+data**: a result with price and rating but no distance is judged on price and
+rating alone. One exception guards the obvious abuse — if the axis the user
+asked about is the missing one, it keeps its weight at a neutral 0.5 rather
+than being redistributed. Otherwise a result that never said where it is could
+win a "nearest" query by being cheap. A result that *does* disclose a bad
+value still ranks below one that disclosed nothing, so honest reporting is
+never punished.
 
 ### 3. Fuzzy consensus bonus (weight: 15%, capped at 2 providers)
 Results mentioned by multiple providers are boosted. Matching uses embedding
-cosine similarity ≥ 0.75 so "Joe's Pizza" and "Joe Pizza" cluster together.
-Capped at a maximum of 2 extra providers to prevent a mediocre result from
-winning just because every provider mentioned it.
+cosine similarity ≥ 0.75 so "Joe's Pizza" and "Joe Pizza" cluster together;
+the keyword fallback matches on normalised title instead. Results from the
+same provider never cluster with each other — one chatty provider cannot
+manufacture its own consensus.
+
+The bonus scales linearly with the number of *additional* providers that
+agree, capped at 2: one extra provider earns half the 15%, two or more earn
+all of it. The cap stops a mediocre result from winning just because every
+provider mentioned it.
 
 ### 4. Sponsored penalty (flat −0.20)
 Any result flagged as sponsored receives a flat score deduction regardless of
@@ -171,11 +200,16 @@ how well it matches the query. This is the thesis of the project.
 
 **Final score formula:**
 ```
-score = 0.50 × similarity
-      + 0.35 × axis_score
-      + 0.15 × consensus_bonus
+score = 0.50 × similarity        # 0–1 cosine (or keyword overlap)
+      + 0.35 × axis_score        # 0–1 intent-weighted P1/P2/P3
+      + 0.15 × consensus_factor  # 0–1: extra_providers capped at 2, ÷ 2
       - 0.20 (if sponsored)
 ```
+
+Each term is a weight times a 0–1 value, and the three weights sum to 1.0, so
+an unsponsored result always scores in 0–1. Preserve that invariant when
+tuning — folding a weight into its own term applies it twice and silently
+shrinks that signal.
 
 ---
 
@@ -412,7 +446,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 23 tests should pass.
+All 61 tests should pass.
 
 ---
 
@@ -422,7 +456,7 @@ All 23 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-23 tests covering:
+61 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -433,9 +467,25 @@ python3.12 -m pytest tests/ -v
 - Consensus bonus applied when two providers agree
 - Intent detection for all four intent types (8 parametrized cases)
 - Constraint extraction from natural language (7 parametrized cases)
+- Consensus bonus reaches its documented 15% weight and caps at 2 providers
+- Fuzzy clustering groups near-identical titles, and refuses to cluster two
+  results from the same provider
+- Sponsored penalty applies on the embedding path, not just the keyword path
+- P3 rating axis stays discriminating under a `min_rating` constraint
+- Axis weights renormalize over populated axes only, and a result cannot win
+  the intent axis by omitting it
+- Both scoring loops pass the populated-axis mask (wiring regression guard)
+- Ollama embedding calls yield to the event loop instead of blocking it, and
+  run concurrently (N results ≈ one round-trip, not N)
+- Both scoring paths share one final-score formula (`_assemble_score`); the
+  weights, consensus cap, and sponsored penalty are pinned directly
 
-No tests require network or Ollama — they use the mock provider and
-keyword-fallback ranker, making them fast and deterministic.
+No tests require network or Ollama. `test_orchestrator.py` uses the mock
+provider and the keyword-fallback ranker; `test_ranker_embeddings.py` uses a
+`StubRanker` that overrides the embedding seams with a canned vector table;
+`test_ranker_async.py` injects a fake async client whose calls sleep, so the
+non-blocking behaviour can be observed without a real Ollama. All run
+deterministically and offline.
 
 ---
 
@@ -472,7 +522,11 @@ static/
   index.html            # demo UI (results + 3D plot + radar chart)
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
-  test_orchestrator.py  # 23 tests
+  test_orchestrator.py       # 23 tests — pipeline, intent, constraints
+  test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
+  test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
+  test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
+  test_assemble_score.py     # 8 tests — the shared final-score formula
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md
