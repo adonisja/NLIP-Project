@@ -117,7 +117,11 @@ def _parse_results(
         if not name:
             continue
 
-        loc = place.get("geometry", {}).get("location", {})
+        # Guard against explicit nulls: the API may send "geometry": null or
+        # "location": null, and .get(k, {}) only defaults on a *missing* key,
+        # not a present-but-null one. `or {}` degrades those to no coords
+        # (distance=None) instead of crashing the whole provider.
+        loc = (place.get("geometry") or {}).get("location") or {}
         lat, lng = loc.get("lat"), loc.get("lng")
         distance = (
             round(haversine_miles(user_lat, user_lng, lat, lng), 2)

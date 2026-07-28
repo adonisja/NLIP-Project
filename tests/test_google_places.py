@@ -91,7 +91,10 @@ def _provider() -> GooglePlacesProvider:
 # --- Contract -----------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_missing_api_key_raises():
+async def test_missing_api_key_raises(monkeypatch):
+    # api_key=None falls back to os.getenv, so clear the env to stay
+    # deterministic on machines where the key happens to be set.
+    monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
     p = GooglePlacesProvider(api_key=None)
     with pytest.raises(ProviderError, match="GOOGLE_PLACES_API_KEY"):
         await p.query("pizza", constraints=QueryConstraints(user_lat=1.0, user_lng=2.0))
@@ -173,6 +176,32 @@ async def test_radius_capped_at_50km(monkeypatch):
         ),
     )
     assert capture["params"]["radius"] == "50000"
+
+
+@pytest.mark.asyncio
+async def test_null_geometry_degrades_to_no_distance(monkeypatch):
+    """An explicit "geometry": null must not crash the whole provider.
+
+    .get("geometry", {}) only defaults on a missing key; a present-but-null
+    geometry (or location) would raise AttributeError without the `or {}` guard.
+    Such a result should degrade to distance=None, not take down the batch.
+    """
+    payload = {
+        "status": "OK",
+        "results": [
+            {"name": "Null Geo", "geometry": None, "rating": 4.0},
+            {"name": "Null Loc", "geometry": {"location": None}},
+            {"name": "Good", "geometry": {"location": {"lat": 40.7682, "lng": -73.9820}}},
+        ],
+    }
+    _patch_transport(monkeypatch, payload)
+    results = await _provider().query(
+        "pizza", constraints=QueryConstraints(user_lat=_USER_LAT, user_lng=_USER_LNG)
+    )
+    by_title = {r.title: r for r in results}
+    assert by_title["Null Geo"].distance is None
+    assert by_title["Null Loc"].distance is None
+    assert by_title["Good"].distance is not None  # the valid one still computes
 
 
 @pytest.mark.asyncio

@@ -217,11 +217,14 @@ class GeoMockProvider(MockProvider):
     """
 
     async def query(self, user_query, max_results=10, constraints=None):
-        from angel_filter.providers.base import ProviderResult
+        from angel_filter.providers.base import ProviderError, ProviderResult
         from angel_filter.providers.google_places import haversine_miles
 
-        if constraints is None or constraints.user_lat is None:
-            return []
+        # Match the real GooglePlacesProvider's contract: raise (not return [])
+        # when there's no location, so the orchestrator exercises the same
+        # skip/failed accounting path it would in production.
+        if constraints is None or constraints.user_lat is None or constraints.user_lng is None:
+            raise ProviderError("no user location supplied; skipping location provider")
         lat, lng = constraints.user_lat, constraints.user_lng
         # Two venues: "Near" a block away, "Far" a couple miles south.
         venues = [
@@ -283,6 +286,11 @@ async def test_location_provider_skipped_when_no_coords():
     response = await orch.handle_query(user_query="pizza lunch")  # no coords
 
     assert response.ranked, "pipeline should still return results from other providers"
+    # The geo provider raised (no coords) -> it must be accounted as failed,
+    # not used. Asserting this catches an orchestrator accounting regression,
+    # which the provider-tag check alone would not.
+    assert "geo" in response.providers_failed
+    assert "geo" not in response.providers_used
     assert all(r.result.provider != "geo" for r in response.ranked)
 
 
