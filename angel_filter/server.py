@@ -176,10 +176,30 @@ if _NLIP_AVAILABLE:
             logger.info("AngelFilterSession stopped.")
 
         async def execute(self, msg: NLIP_Message) -> NLIP_Message:
-            user_query = str(msg.content) if msg.content else ""
+            # Use the SDK's extractor, not str(msg.content). An NLIP_Message is
+            # a multipart structure: a top-level content field PLUS a list of
+            # typed submessages. str(msg.content) only sees the top level, so it
+            # drops text carried in submessages and stringifies a dict content
+            # (e.g. "{'intent': 'search'}") straight into the query.
+            # extract_text() filters to text-format parts and joins them. It
+            # returns None (not "") when the message carries no text at all, so
+            # coerce before stripping.
+            user_query = (msg.extract_text() or "").strip()
             logger.info("Incoming query: %r", user_query)
+            if not user_query:
+                return NLIP_Factory.create_text(
+                    "No text query found in the NLIP message."
+                )
             response = await ORCHESTRATOR.handle_query(user_query=user_query)
-            return NLIP_Factory.create_text(_format_reply(response))
+            # Multipart reply: a human-readable text summary AND a structured
+            # JSON submessage carrying the full ranking (scores, axis breakdown,
+            # sponsored flags). A text-only client reads extract_text(); an agent
+            # reads the JSON via extract_field_list("structured", "JSON") and gets
+            # machine-readable data — including the sponsored flag, which is the
+            # project's thesis — instead of having to parse it out of prose.
+            reply = NLIP_Factory.create_text(_format_reply(response))
+            reply.add_json(_serialize_response(response))
+            return reply
 
 
     class AngelFilterApplication(NLIP_Application):
@@ -300,30 +320,7 @@ if _NLIP_AVAILABLE:
             except Exception:
                 QUERY_COUNT.labels(status="error").inc()
                 raise
-        return {
-            "providers_used": response.providers_used,
-            "providers_failed": response.providers_failed,
-            "intent": response.intent.value,
-            "constraints": {
-                "budget": response.constraints.budget,
-                "max_distance": response.constraints.max_distance,
-                "min_rating": response.constraints.min_rating,
-            },
-            "results": [
-                {
-                    "title": r.result.title,
-                    "snippet": r.result.snippet,
-                    "url": r.result.url,
-                    "provider": r.result.provider,
-                    "score": round(r.score, 3),
-                    "rationale": r.rationale,
-                    "sponsored": r.result.sponsored,
-                    "consensus_count": r.consensus_count,
-                    "axis_scores": r.axis_scores,
-                }
-                for r in response.ranked
-            ],
-        }
+        return _serialize_response(response)
 
     @app.get("/metrics")
     async def metrics(_user: str = Depends(require_session)):
@@ -453,31 +450,7 @@ else:
                     detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
                 )
 
-        payload = {
-            "providers_used": response.providers_used,
-            "providers_failed": response.providers_failed,
-            "intent": response.intent.value,
-            "constraints": {
-                "budget": response.constraints.budget,
-                "max_distance": response.constraints.max_distance,
-                "min_rating": response.constraints.min_rating,
-            },
-            "cached": False,
-            "results": [
-                {
-                    "title": r.result.title,
-                    "snippet": r.result.snippet,
-                    "url": r.result.url,
-                    "provider": r.result.provider,
-                    "score": round(r.score, 3),
-                    "rationale": r.rationale,
-                    "sponsored": r.result.sponsored,
-                    "consensus_count": r.consensus_count,
-                    "axis_scores": r.axis_scores,
-                }
-                for r in response.ranked
-            ],
-        }
+        payload = {**_serialize_response(response), "cached": False}
         CACHE.set(body.query, cache_pref, {**payload, "cached": True})
         return payload
 
@@ -497,6 +470,42 @@ else:
 
 
 # --- Helpers ------------------------------------------------------------------
+
+def _serialize_response(response) -> dict:
+    """Canonical structured form of an OrchestratorResponse.
+
+    Single source of truth for the response shape shared by all three
+    consumers: both /query handlers (JSON over HTTP) and the NLIP session's
+    structured submessage. Keeping it in one place stops the per-result fields
+    — score, axis_scores, sponsored, consensus_count — from drifting between
+    the paths, which they had already started to (two near-identical inline
+    copies existed before this).
+    """
+    return {
+        "providers_used": response.providers_used,
+        "providers_failed": response.providers_failed,
+        "intent": response.intent.value,
+        "constraints": {
+            "budget": response.constraints.budget,
+            "max_distance": response.constraints.max_distance,
+            "min_rating": response.constraints.min_rating,
+        },
+        "results": [
+            {
+                "title": r.result.title,
+                "snippet": r.result.snippet,
+                "url": r.result.url,
+                "provider": r.result.provider,
+                "score": round(r.score, 3),
+                "rationale": r.rationale,
+                "sponsored": r.result.sponsored,
+                "consensus_count": r.consensus_count,
+                "axis_scores": r.axis_scores,
+            }
+            for r in response.ranked
+        ],
+    }
+
 
 def _cache_pref(preference: str | None, lat: float | None, lng: float | None) -> str:
     """Compose the cache's preference key so location is part of the identity.

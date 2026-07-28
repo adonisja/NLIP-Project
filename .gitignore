@@ -37,3 +37,6 @@ refs/
 
 # Logs
 *.log
+
+# Playwright MCP browser artifacts (local only)
+.playwright-mcp/
