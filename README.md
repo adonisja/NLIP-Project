@@ -27,12 +27,13 @@ All changes go through pull requests — no direct commits to `main`, including 
 
 ---
 
-## Status (as of May 31, 2026)
+## Status (as of July 28, 2026)
 
 | Component | State |
 |---|---|
-| FastAPI server (fallback mode) | **Working** |
-| NLIP server (`NLIPApplication` / `NLIPSession`) | Pending — NLIP libraries not yet installable |
+| NLIP server (`NLIPApplication` / `NLIPSession`) | **Working** — libraries install; the server runs the NLIP path by default |
+| NLIP — structured replies (text + JSON submessages) | **Working** — ranking returned as machine-readable JSON, not just prose |
+| FastAPI fallback server | **Working** — used only if the NLIP libraries fail to import |
 | Provider: OpenAI (`gpt-4o-mini`) | **Working** — needs `OPENAI_API_KEY` |
 | Provider: Gemini (`gemini-2.5-flash`) | **Working** — needs `GEMINI_API_KEY` |
 | Provider: Ollama (`llama3.2`) | **Working** — runs locally, no key needed |
@@ -60,7 +61,8 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **73 passing** |
+| Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
+| Tests | **82 passing** |
 
 ---
 
@@ -440,13 +442,16 @@ You should see something like:
 ```json
 {
   "ok": true,
-  "mode": "fallback",
+  "mode": "nlip",
+  "nlip_available": true,
   "providers": ["openai", "gemini", "ollama"],
   "uptime_seconds": 5.1
 }
 ```
 
-If `providers` is empty, check your `.env` file and make sure the keys are set correctly.
+`mode` is `"nlip"` when the NLIP libraries are installed (the default) and
+`"fallback"` if they fail to import. If `providers` is empty, check your `.env`
+file and make sure the keys are set correctly.
 
 Run the test suite (no network or API keys needed):
 ```bash
@@ -457,7 +462,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 73 tests should pass.
+All 82 tests should pass.
 
 ---
 
@@ -467,7 +472,7 @@ All 73 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-73 tests covering:
+82 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -542,6 +547,7 @@ tests/
   test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
   test_assemble_score.py     # 8 tests — the shared final-score formula
   test_google_places.py      # 10 tests — Google Places provider + haversine
+  test_nlip_session.py       # 8 tests — NLIP message extraction + structured reply
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md
