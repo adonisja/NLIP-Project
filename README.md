@@ -54,18 +54,18 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Ranker — hard constraint filtering | **Working** |
 | Ranker — fuzzy consensus clustering | **Working** |
 | Ranker — sponsored content penalty | **Working** |
-| Query result cache (3-hour TTL, 10 query history) | **Working** |
+| Query result cache (3-hour TTL, 10 query history) | **Working** — shared by both the NLIP and REST paths |
 | `GET /health` | **Working** |
 | `GET /metrics` (Prometheus) | **Working** |
-| `GET /history` (recent queries) | **Working** |
-| `POST /cache/clear` | **Working** |
+| `GET /history` (recent queries) | **Working** — requires a session |
+| `POST /cache/clear` | **Working** — requires a session |
 | Demo UI — ranked results with score bars | **Working** |
 | Demo UI — 3D scoring space (Plotly) | **Working** |
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **147 passing** |
+| Tests | **159 passing** |
 
 ---
 
@@ -569,7 +569,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 147 tests should pass.
+All 159 tests should pass.
 
 ---
 
@@ -579,7 +579,7 @@ All 147 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-147 tests covering:
+159 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -609,6 +609,10 @@ python3.12 -m pytest tests/ -v
   serialisation, so the UI can distinguish a placeholder from a measurement
 - `/health` is ours in NLIP mode (upstream's router no longer shadows it) while
   its `/health/live` and `/health/ready` probes still respond
+- Both branches of the `_NLIP_AVAILABLE` if/else declare the same routes, each
+  registered exactly once, with the diagnostic ones behind a session
+- The NLIP session caches: a repeated query reuses the stored payload instead of
+  re-running every provider, and a different priority keys separately
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
 - The NLIP session reads query, preference, and location as separate typed
@@ -668,6 +672,7 @@ tests/
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
   test_axis_scored_mask.py   # 7 tests — which axes were measured vs. placeholder
   test_health_route.py       # 7 tests — /health ownership vs. nlip_server's router
+  test_route_parity.py       # 12 tests — both branches expose the same routes; NLIP caching
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_google_places.py      # 11 tests — Google Places provider + haversine
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)

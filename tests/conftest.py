@@ -19,3 +19,27 @@ import os
 
 # setdefault: don't clobber a real value a developer may have set locally.
 os.environ.setdefault("OLLAMA_MODEL", "llama3.2")
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_query_cache():
+    """Empty the process-wide query cache around every test.
+
+    CACHE is module-level state shared by both transports. Once the NLIP path
+    started caching, a test whose query matched an earlier test's key was served
+    the stored payload and never reached its orchestrator spy — the assertion
+    then failed on an empty kwargs dict, passing in isolation and failing in the
+    suite. Tests must not depend on execution order, so this resets it.
+
+    QueryCache exposes no public clear(); /cache/clear reaches into the same two
+    attributes, so this mirrors it rather than inventing an API.
+    """
+    from angel_filter.cache import CACHE
+
+    CACHE._store.clear()
+    CACHE._history.clear()
+    yield
+    CACHE._store.clear()
+    CACHE._history.clear()
