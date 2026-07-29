@@ -256,6 +256,7 @@ if _NLIP_AVAILABLE:
         preference: str | None = None
         lat: float | None = None   # user origin latitude (for distance-aware providers)
         lng: float | None = None   # user origin longitude
+        priority: str | None = None  # "price"|"distance"|"rating"; None = auto-detect
 
     @app.get("/")
     async def index(request: Request):
@@ -331,6 +332,7 @@ if _NLIP_AVAILABLE:
                     user_preference=body.preference,
                     user_lat=body.lat,
                     user_lng=body.lng,
+                    intent=_parse_priority(body.priority),
                 )
                 QUERY_COUNT.labels(status="success").inc()
                 for r in response.ranked:
@@ -380,6 +382,7 @@ else:
         preference: str | None = None
         lat: float | None = None   # user origin latitude (for distance-aware providers)
         lng: float | None = None   # user origin longitude
+        priority: str | None = None  # "price"|"distance"|"rating"; None = auto-detect
 
     @app.get("/")
     async def index(request: Request):
@@ -441,7 +444,7 @@ else:
 
         # Fold location into the cache's preference component so two users at
         # different coordinates don't get served each other's distance results.
-        cache_pref = _cache_pref(body.preference, body.lat, body.lng)
+        cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
 
         # Return cached result if fresh
         cached = CACHE.get(body.query, cache_pref)
@@ -456,6 +459,7 @@ else:
                     user_preference=body.preference,
                     user_lat=body.lat,
                     user_lng=body.lng,
+                    intent=_parse_priority(body.priority),
                 )
                 QUERY_COUNT.labels(status="success").inc()
                 for r in response.ranked:
@@ -548,11 +552,7 @@ def _extract_priority(msg) -> QueryIntent | None:
     sub = _labeled(msg, _PRIORITY_LABEL)
     if sub is None or not isinstance(sub.content, str):
         return None
-    try:
-        return QueryIntent(sub.content.strip().lower())
-    except ValueError:
-        logger.warning("Unrecognised priority %r — falling back to detection", sub.content)
-        return None
+    return _parse_priority(sub.content)
 
 
 def _extract_location(msg) -> tuple[float | None, float | None]:
@@ -614,17 +614,47 @@ def _serialize_response(response) -> dict:
     }
 
 
-def _cache_pref(preference: str | None, lat: float | None, lng: float | None) -> str:
+def _parse_priority(value: str | None) -> QueryIntent | None:
+    """Map a priority string to a QueryIntent, or None to auto-detect.
+
+    Shared by the REST handlers and (via _extract_priority) the NLIP session so
+    both paths treat the same input identically. Unrecognised values degrade to
+    None rather than raising: a client that sends garbage loses the override,
+    not the query.
+    """
+    if not value:
+        return None
+    try:
+        return QueryIntent(value.strip().lower())
+    except ValueError:
+        logger.warning("Unrecognised priority %r — falling back to detection", value)
+        return None
+
+
+def _cache_pref(
+    preference: str | None,
+    lat: float | None,
+    lng: float | None,
+    priority: str | None = None,
+) -> str:
     """Compose the cache's preference key so location is part of the identity.
 
     The cache keys on (query, preference); results now depend on the user's
     coordinates too, so we fold them in. Coordinates are rounded to ~3 decimal
     places (~110m) so trivially different GPS readings still hit the cache.
+
+    Priority is folded in for the same reason: the same query ranked by price
+    and by rating produces different orderings, so they must not share a cache
+    entry. Normalised through _parse_priority so "PRICE" and "price" — and every
+    unrecognised value, which all mean auto — collapse to one key.
     """
     base = preference or ""
-    if lat is None or lng is None:
-        return base
-    return f"{base}|@{round(lat, 3)},{round(lng, 3)}"
+    if lat is not None and lng is not None:
+        base = f"{base}|@{round(lat, 3)},{round(lng, 3)}"
+    intent = _parse_priority(priority)
+    if intent is not None:
+        base = f"{base}|p={intent.value}"
+    return base
 
 
 def _format_reply(response) -> str:
