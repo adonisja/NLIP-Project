@@ -20,7 +20,7 @@ import asyncio
 
 import pytest
 
-from angel_filter.geocode import enrich_distances, looks_like_a_venue
+from angel_filter.geocode import _names_agree, enrich_distances, looks_like_a_venue
 from angel_filter.providers.base import ProviderResult
 
 # Times Square-ish, and a point about 1.15 miles north.
@@ -46,13 +46,18 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    """Stands in for httpx.AsyncClient; serves canned payloads by query text."""
+    """Stands in for httpx.AsyncClient; serves canned Places API (New) payloads.
 
-    def __init__(self, by_query=None, fail_on=(), status="OK"):
+    Shape mirrors places.googleapis.com/v1/places:searchText — a POST with a JSON
+    body, and a response whose misses are an empty `places` list rather than a
+    status string. Verified against the live API before being canned here.
+    """
+
+    def __init__(self, by_query=None, fail_on=()):
         self.by_query = by_query or {}
         self.fail_on = set(fail_on)
-        self.status = status
         self.calls: list[str] = []
+        self.headers_seen: list[dict] = []
 
     async def __aenter__(self):
         return self
@@ -60,17 +65,23 @@ class _FakeClient:
     async def __aexit__(self, *exc):
         return False
 
-    async def get(self, url, params=None):
-        q = (params or {}).get("query", "")
+    async def post(self, url, json=None, headers=None):
+        q = (json or {}).get("textQuery", "")
         self.calls.append(q)
+        self.headers_seen.append(headers or {})
         if q in self.fail_on:
             raise RuntimeError("boom")
-        coords = self.by_query.get(q)
-        if coords is None:
-            return _FakeResponse({"status": "ZERO_RESULTS", "results": []})
+        entry = self.by_query.get(q)
+        if entry is None:
+            return _FakeResponse({})  # no match: empty body
+        # An entry may carry the name Google matched, which differs from the
+        # query whenever Text Search falls back to its best guess.
+        coords, matched_name = (entry, q) if len(entry) == 2 else (entry[:2], entry[2])
         return _FakeResponse({
-            "status": self.status,
-            "results": [{"geometry": {"location": {"lat": coords[0], "lng": coords[1]}}}],
+            "places": [{
+                "location": {"latitude": coords[0], "longitude": coords[1]},
+                "displayName": {"text": matched_name},
+            }]
         })
 
 
@@ -217,6 +228,68 @@ async def test_noop_without_prerequisites(lat, lng, key, monkeypatch):
 
     assert n == 0
     assert results[0].distance is None
+
+
+# --- Rejecting Google's best-guess fallback ------------------------------------
+# Text Search never reports "not found" — it returns the closest thing it has.
+# Asking for a venue that does not exist yields a real but unrelated place, and
+# taking its coordinates would attach a plausible distance to a hallucinated
+# name. Observed against the live API: "Totally Fake Nonexistent Cafe XYZQ"
+# matched "Kawaii Coffee - Vietnamese Coffee". AI providers do invent venue
+# names, so this is the failure mode that would actually bite.
+
+@pytest.mark.parametrize("asked,matched", [
+    ("Joe's Pizza", "Joe's Pizza Broadway"),          # real suffix variation
+    ("Katz's Delicatessen", "Katz's Delicatessen"),   # exact
+    ("Los Tacos No. 1", "Los Tacos No 1"),            # punctuation drift
+])
+def test_name_agreement_accepts_real_variation(asked, matched):
+    assert _names_agree(asked, matched) is True
+
+
+@pytest.mark.parametrize("asked,matched", [
+    ("Totally Fake Nonexistent Cafe XYZQ", "Kawaii Coffee - Vietnamese Coffee"),
+    ("Imaginary Ramen Palace", "Blackstone Coffee Roaster"),
+    ("Zzzq Bogus Diner", "Katz's Delicatessen"),
+])
+def test_name_agreement_rejects_unrelated_matches(asked, matched):
+    assert _names_agree(asked, matched) is False
+
+
+def test_generic_words_alone_do_not_constitute_agreement():
+    """Two unrelated venues both being a "cafe" must not count as a match.
+
+    Without stripping generic words, "Fake Cafe" and "Kawaii Cafe" would agree
+    on "cafe" and the fabricated name would acquire real coordinates.
+    """
+    assert _names_agree("Fake Cafe", "Kawaii Cafe") is False
+
+
+@pytest.mark.asyncio
+async def test_hallucinated_venue_stays_unscored(fake_httpx):
+    """End to end: a name Google best-guesses to something else gets no distance."""
+    results = [_result("Totally Fake Nonexistent Cafe XYZQ")]
+    fake_httpx(_FakeClient({
+        # Google returns real coordinates — for an entirely different place.
+        "Totally Fake Nonexistent Cafe XYZQ": (NEAR_LAT, NEAR_LNG, "Kawaii Coffee"),
+    }))
+
+    n = await enrich_distances(results, USER_LAT, USER_LNG, api_key="k")
+
+    assert n == 0
+    assert results[0].distance is None
+
+
+@pytest.mark.asyncio
+async def test_real_venue_with_suffix_still_resolves(fake_httpx):
+    """The check must not be so strict that legitimate matches are lost."""
+    results = [_result("Joe's Pizza")]
+    fake_httpx(_FakeClient({"Joe's Pizza": (NEAR_LAT, NEAR_LNG, "Joe's Pizza Broadway")}))
+
+    n = await enrich_distances(results, USER_LAT, USER_LNG, api_key="k")
+
+    assert n == 1
+    assert results[0].distance is not None
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,11 @@ from angel_filter.providers.google_places import haversine_miles
 
 logger = logging.getLogger(__name__)
 
-_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+# Places API (New). The legacy maps.googleapis.com/maps/api/place/* endpoints
+# return REQUEST_DENIED on any project created after Google retired them
+# ("You're calling a legacy API, which is not enabled for your project"), so a
+# contributor with a fresh key cannot use them at all.
+_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 _TIMEOUT = 10
 
 # Cap concurrent lookups. The fan-out can produce ~40 results across providers
@@ -69,6 +73,41 @@ def looks_like_a_venue(title: str) -> bool:
     return True
 
 
+# Words that carry no identifying signal, so they should not be what makes two
+# names "agree" — every other venue is a cafe or a restaurant.
+_GENERIC_WORDS = frozenset({
+    "the", "a", "an", "of", "and", "at", "in", "on", "for", "to",
+    "cafe", "café", "coffee", "restaurant", "bar", "grill", "kitchen",
+    "house", "shop", "co", "inc", "llc", "nyc", "new", "york",
+    "pizza", "pizzeria", "deli", "delicatessen", "bakery", "diner",
+    "food", "eatery", "bistro", "tacos", "taco", "sushi", "noodle",
+})
+
+
+def _significant_words(name: str) -> set[str]:
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in name.lower())
+    return {w for w in cleaned.split() if w and w not in _GENERIC_WORDS}
+
+
+def _names_agree(asked: str, matched: str) -> bool:
+    """Did Text Search return the place we actually asked for?
+
+    Must tolerate real variation — "Joe's Pizza" legitimately matches "Joe's
+    Pizza Broadway" — while rejecting the unrelated best-guess that comes back
+    for a name that does not exist.
+
+    The test is on *distinctive* words: generic ones like "cafe" or "pizza" are
+    stripped first, so "Fake Cafe" and "Kawaii Coffee" share nothing, while
+    "Joe's Pizza" and "Joe's Pizza Broadway" still share "joe's". When the asked
+    name is entirely generic there is nothing to verify against, and we accept —
+    the venue-shape filter has already screened the obvious junk.
+    """
+    a, m = _significant_words(asked), _significant_words(matched)
+    if not a:
+        return True
+    return bool(a & m)
+
+
 async def _lookup_one(client, title: str, lat: float, lng: float, api_key: str):
     """Geocode a single title. Returns (lat, lng) or None.
 
@@ -76,15 +115,28 @@ async def _lookup_one(client, title: str, lat: float, lng: float, api_key: str):
     the query. The caller keeps distance=None for anything unresolved.
     """
     try:
-        resp = await client.get(
+        resp = await client.post(
             _TEXT_SEARCH_URL,
-            params={
-                "query": title,
+            json={
+                "textQuery": title,
                 # Bias toward the user so "Joe's Pizza" resolves to the nearby
                 # one rather than a same-named place in another city.
-                "location": f"{lat},{lng}",
-                "radius": "50000",
-                "key": api_key,
+                "locationBias": {
+                    "circle": {
+                        "center": {"latitude": lat, "longitude": lng},
+                        "radius": 50000.0,
+                    }
+                },
+                "maxResultCount": 1,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                # The new API bills by which fields you ask for, so request only
+                # the location — this is a geocode, not a details lookup.
+                # displayName too, not just location: Text Search always returns
+                # its best guess, so we must check *what* it matched.
+                "X-Goog-FieldMask": "places.location,places.displayName",
             },
         )
         resp.raise_for_status()
@@ -93,17 +145,27 @@ async def _lookup_one(client, title: str, lat: float, lng: float, api_key: str):
         logger.debug("Geocode failed for %r: %s", title, exc)
         return None
 
-    if data.get("status") not in ("OK", "ZERO_RESULTS"):
-        logger.debug("Geocode status %s for %r", data.get("status"), title)
+    # No match is an empty body, not an error status — the new API signals
+    # failures with the HTTP code, which raise_for_status already caught.
+    places = data.get("places") or []
+    if not places:
         return None
 
-    results = data.get("results") or []
-    if not results:
+    # Text Search never says "not found" — it returns its closest guess. Asking
+    # for a venue that does not exist yields a real, unrelated place, and taking
+    # its coordinates would attach a plausible distance to a hallucinated name.
+    # Observed live: "Totally Fake Nonexistent Cafe XYZQ" matched "Kawaii Coffee".
+    # So confirm the match actually resembles what we asked for.
+    matched = ((places[0].get("displayName") or {}).get("text") or "")
+    if not _names_agree(title, matched):
+        logger.debug("Geocode rejected: asked %r, got %r", title, matched)
         return None
-    loc = (results[0].get("geometry") or {}).get("location") or {}
-    if not isinstance(loc.get("lat"), (int, float)) or not isinstance(loc.get("lng"), (int, float)):
+
+    loc = places[0].get("location") or {}
+    lat_v, lng_v = loc.get("latitude"), loc.get("longitude")
+    if not isinstance(lat_v, (int, float)) or not isinstance(lng_v, (int, float)):
         return None
-    return float(loc["lat"]), float(loc["lng"])
+    return float(lat_v), float(lng_v)
 
 
 async def enrich_distances(

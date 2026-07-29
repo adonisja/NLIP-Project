@@ -15,6 +15,7 @@ httpx.AsyncClient to bind a MockTransport that serves our canned response.
 from __future__ import annotations
 
 import functools
+import json
 
 import httpx
 import pytest
@@ -32,46 +33,56 @@ from angel_filter.providers.google_places import (
 # User origin used across the distance tests.
 _USER_LAT, _USER_LNG = 40.7680, -73.9819  # Columbus Circle, NYC
 
+# Shapes below are Places API (New) — places.googleapis.com/v1/places:searchText.
+# The legacy maps.googleapis.com endpoints return REQUEST_DENIED on any project
+# created after Google retired them, so the provider had to migrate. Field names
+# differ throughout: "places" not "results", displayName.text not name,
+# location.latitude not geometry.location.lat, and priceLevel is an enum string
+# rather than a 0-4 integer. Verified against the live API before canning.
 _NEARBY_OK = {
-    "status": "OK",
-    "results": [
+    "places": [
         {
-            "name": "Joe's Pizza",
-            "vicinity": "7 Carmine St",
+            "displayName": {"text": "Joe's Pizza"},
+            "formattedAddress": "7 Carmine St",
             "rating": 4.7,
-            "price_level": 1,
-            "geometry": {"location": {"lat": 40.7305, "lng": -74.0026}},
+            "priceLevel": "PRICE_LEVEL_INEXPENSIVE",
+            "location": {"latitude": 40.7305, "longitude": -74.0026},
         },
         {
-            "name": "Corner Bistro",
-            "vicinity": "331 W 4th St",
+            "displayName": {"text": "Corner Bistro"},
+            "formattedAddress": "331 W 4th St",
             "rating": 4.2,
-            "price_level": 3,
+            "priceLevel": "PRICE_LEVEL_EXPENSIVE",
             # ~same block as the user -> should be the closest
-            "geometry": {"location": {"lat": 40.7682, "lng": -73.9820}},
+            "location": {"latitude": 40.7682, "longitude": -73.9820},
         },
         {
-            # No price_level, no rating, no geometry -> graceful degradation
-            "name": "Mystery Spot",
-            "vicinity": "Somewhere",
+            # No priceLevel, no rating, no location -> graceful degradation
+            "displayName": {"text": "Mystery Spot"},
+            "formattedAddress": "Somewhere",
         },
     ],
 }
 
-_ZERO_RESULTS = {"status": "ZERO_RESULTS", "results": []}
-_REQUEST_DENIED = {"status": "REQUEST_DENIED", "error_message": "bad key"}
+# A miss is an empty body, not a status string.
+_ZERO_RESULTS: dict = {}
 
 
 def _patch_transport(monkeypatch, payload: dict, *, capture: dict | None = None):
     """Make the provider's internal httpx.AsyncClient serve `payload`.
 
-    If `capture` is given, the outgoing request's query params are recorded
-    into it so tests can assert on what the provider sent.
+    If `capture` is given, the outgoing request is recorded into it so tests can
+    assert on what the provider sent. The new API is a POST with a JSON body and
+    an API key in a header, so we capture those rather than query params.
     """
     def handler(request: httpx.Request) -> httpx.Response:
         if capture is not None:
             capture["url"] = str(request.url)
-            capture["params"] = dict(request.url.params)
+            capture["headers"] = dict(request.headers)
+            try:
+                capture["body"] = json.loads(request.content or b"{}")
+            except ValueError:
+                capture["body"] = {}
         return httpx.Response(200, json=payload)
 
     transport = httpx.MockTransport(handler)
@@ -157,10 +168,16 @@ async def test_sends_user_location_and_radius(monkeypatch):
         ),
     )
 
-    assert capture["params"]["location"] == f"{_USER_LAT},{_USER_LNG}"
+    circle = capture["body"]["locationBias"]["circle"]
+    assert circle["center"] == {"latitude": _USER_LAT, "longitude": _USER_LNG}
     # 2 miles ≈ 3218 meters
-    assert capture["params"]["radius"] == str(int(2.0 * 1609.34))
-    assert capture["params"]["keyword"] == "pizza"
+    assert circle["radius"] == float(int(2.0 * 1609.34))
+    # searchNearby has no free-text field, so the query would be silently
+    # dropped there. searchText carries it — pin that it actually does.
+    assert capture["body"]["textQuery"] == "pizza"
+    # The new API authenticates by header, not a `key` query param.
+    assert capture["headers"]["x-goog-api-key"] == "test-key"
+    assert "places.location" in capture["headers"]["x-goog-fieldmask"]
 
 
 @pytest.mark.asyncio
@@ -175,23 +192,23 @@ async def test_radius_capped_at_50km(monkeypatch):
             user_lat=_USER_LAT, user_lng=_USER_LNG, max_distance=100.0  # 160km
         ),
     )
-    assert capture["params"]["radius"] == "50000"
+    assert capture["body"]["locationBias"]["circle"]["radius"] == 50000.0
 
 
 @pytest.mark.asyncio
-async def test_null_geometry_degrades_to_no_distance(monkeypatch):
-    """An explicit "geometry": null must not crash the whole provider.
+async def test_null_location_degrades_to_no_distance(monkeypatch):
+    """An explicit "location": null must not crash the whole provider.
 
-    .get("geometry", {}) only defaults on a missing key; a present-but-null
-    geometry (or location) would raise AttributeError without the `or {}` guard.
-    Such a result should degrade to distance=None, not take down the batch.
+    .get("location", {}) only defaults on a missing key; a present-but-null
+    location would raise AttributeError without the `or {}` guard. Such a result
+    should degrade to distance=None, not take down the batch.
     """
     payload = {
-        "status": "OK",
-        "results": [
-            {"name": "Null Geo", "geometry": None, "rating": 4.0},
-            {"name": "Null Loc", "geometry": {"location": None}},
-            {"name": "Good", "geometry": {"location": {"lat": 40.7682, "lng": -73.9820}}},
+        "places": [
+            {"displayName": {"text": "Null Loc"}, "location": None, "rating": 4.0},
+            {"displayName": {"text": "No Loc Key"}},
+            {"displayName": {"text": "Good"},
+             "location": {"latitude": 40.7682, "longitude": -73.9820}},
         ],
     }
     _patch_transport(monkeypatch, payload)
@@ -199,8 +216,8 @@ async def test_null_geometry_degrades_to_no_distance(monkeypatch):
         "pizza", constraints=QueryConstraints(user_lat=_USER_LAT, user_lng=_USER_LNG)
     )
     by_title = {r.title: r for r in results}
-    assert by_title["Null Geo"].distance is None
     assert by_title["Null Loc"].distance is None
+    assert by_title["No Loc Key"].distance is None
     assert by_title["Good"].distance is not None  # the valid one still computes
 
 
@@ -215,12 +232,26 @@ async def test_zero_results_returns_empty_not_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_api_status_error_raises(monkeypatch):
-    """Places encodes failures in a status field, not the HTTP code."""
-    _patch_transport(monkeypatch, _REQUEST_DENIED)
-    p = _provider()
-    with pytest.raises(ProviderError, match="REQUEST_DENIED"):
-        await p.query(
+async def test_http_error_becomes_a_provider_error(monkeypatch):
+    """The new API signals failures with HTTP codes, not a status field.
+
+    A bad key returns 403 rather than a 200 carrying REQUEST_DENIED, so the
+    provider must surface it as ProviderError for the orchestrator to isolate.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"message": "bad key"}})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real_client(transport=transport, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+
+    with pytest.raises(ProviderError, match="Google Places request failed"):
+        await _provider().query(
             "pizza", constraints=QueryConstraints(user_lat=_USER_LAT, user_lng=_USER_LNG)
         )
 
