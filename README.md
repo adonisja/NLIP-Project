@@ -65,7 +65,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **133 passing** |
+| Tests | **147 passing** |
 
 ---
 
@@ -204,6 +204,21 @@ than being redistributed. Otherwise a result that never said where it is could
 win a "nearest" query by being cheap. A result that *does* disclose a bad
 value still ranks below one that disclosed nothing, so honest reporting is
 never punished.
+
+**The API says which axes were real.** `axis_scores` stores a neutral `0.5` for
+an undisclosed axis, which is indistinguishable from a genuinely mid-scoring
+one, so every result also carries an `axis_scored` map:
+
+```json
+"axis_scores": {"P1_price": 0.93, "P2_distance": 0.5, "P3_rating": 0.84},
+"axis_scored": {"P1_price": true, "P2_distance": false, "P3_rating": true}
+```
+
+The demo UI honours it: undisclosed axes read **"no data"** on hover and in the
+winner's axis chips, and a result missing any axis is drawn hollow in the 3D
+plot — its position on that axis is an assumption, not a measurement. Without
+this the charts plotted the `0.5` placeholder as though it were measured, which
+is precisely the equivalence this section exists to reject.
 
 ### 3. Fuzzy consensus bonus (weight: 15%, capped at 2 providers)
 Results mentioned by multiple providers are boosted. Matching uses embedding
@@ -522,23 +537,28 @@ After starting the server, check that providers loaded correctly:
 curl http://localhost:8005/health
 ```
 
-In NLIP mode this returns `nlip_server`'s own health payload:
+You should see:
 ```json
-{"status": "healthy"}
+{
+  "ok": true,
+  "mode": "nlip",
+  "nlip_available": true,
+  "uptime_seconds": 5.1,
+  "providers": ["brave", "openai", "gemini", "ollama"]
+}
 ```
 
-> **Note — this is not our handler.** `nlip_server.setup_server()` registers its
-> own `/health` route before ours, and FastAPI matches the first route
-> registered, so `angel_filter.server.health` is unreachable in NLIP mode. Our
-> richer `_health_response` (`ok`, `mode`, `nlip_available`, `providers`,
-> `uptime_seconds`) only serves on the fallback path. Confirmed by inspecting
-> `app.routes`: index 0 is `nlip_server.routes.health.health_check`, index 1 is
-> ours. Worth reconciling — until then `/health` cannot tell you which providers
-> loaded.
+`mode` is `"nlip"` when the NLIP libraries import (the default) and `"fallback"`
+otherwise. If `providers` is empty or missing one you expected, check the
+corresponding key in `.env`.
 
-To see which providers actually loaded, check the startup log — the server logs
-each provider it enables — or read the `providers_used` field on a query
-response.
+> **Implementation note.** `nlip_server.setup_server()` mounts its own health
+> router, whose `/health` returns a bare `{"status": "healthy"}`. FastAPI
+> resolves against the first route registered for a path, so simply declaring
+> ours afterwards was never reached — `/health` couldn't report which providers
+> had loaded. We now drop that one route from our app's table before declaring
+> ours. Upstream's `/health/live` and `/health/ready` are untouched, and the
+> library itself is not forked.
 
 Run the test suite (no network or API keys needed):
 ```bash
@@ -549,7 +569,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 133 tests should pass.
+All 147 tests should pass.
 
 ---
 
@@ -559,7 +579,7 @@ All 133 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-133 tests covering:
+147 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -585,6 +605,10 @@ python3.12 -m pytest tests/ -v
 - REST and NLIP share one priority parser, `POST /query` actually forwards the
   override to the orchestrator, and the cache key separates priorities so a
   price ranking is never served from a rating query's entry
+- `axis_scored` marks which axes a provider actually disclosed and survives
+  serialisation, so the UI can distinguish a placeholder from a measurement
+- `/health` is ours in NLIP mode (upstream's router no longer shadows it) while
+  its `/health/live` and `/health/ready` probes still respond
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
 - The NLIP session reads query, preference, and location as separate typed
@@ -642,6 +666,8 @@ tests/
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
+  test_axis_scored_mask.py   # 7 tests — which axes were measured vs. placeholder
+  test_health_route.py       # 7 tests — /health ownership vs. nlip_server's router
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_google_places.py      # 11 tests — Google Places provider + haversine
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)

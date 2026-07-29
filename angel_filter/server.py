@@ -138,6 +138,23 @@ ORCHESTRATOR = _build_orchestrator()
 
 # --- Shared health helper -----------------------------------------------------
 
+def _drop_route(app, path: str) -> int:
+    """Remove every route registered for `path`, returning how many were dropped.
+
+    Used to take back a path an upstream router already claimed. FastAPI resolves
+    a request against the first matching route, so re-declaring the path is not
+    enough — the earlier registration keeps winning silently. Removing it is the
+    only way to override without forking the library.
+
+    Returns the count so callers can assert the removal actually happened; a
+    silent zero would mean an upstream rename had quietly restored the shadowing.
+    """
+    matching = [r for r in app.routes if getattr(r, "path", None) == path]
+    for route in matching:
+        app.routes.remove(route)
+    return len(matching)
+
+
 def _health_response(mode: str, nlip_available: bool) -> dict:
     return {
         "ok": True,
@@ -318,6 +335,17 @@ if _NLIP_AVAILABLE:
     async def logout(request: Request):
         request.session.clear()
         return JSONResponse({"ok": True})
+
+    # setup_server() mounts nlip_server's own health router, whose GET /health
+    # returns a bare {"status": "healthy"}. FastAPI matches the first route
+    # registered for a path, so simply declaring ours below would never be
+    # reached — which is what happened: our richer payload was dead code in NLIP
+    # mode and /health could not tell you which providers had loaded.
+    #
+    # Drop only the conflicting /health entry from *our* app's route table.
+    # Upstream's /health/live and /health/ready stay, and the library itself is
+    # untouched — we are consumers of nlip_server, not a fork of it.
+    _drop_route(app, "/health")
 
     @app.get("/health")
     async def health():
@@ -608,6 +636,10 @@ def _serialize_response(response) -> dict:
                 "sponsored": r.result.sponsored,
                 "consensus_count": r.consensus_count,
                 "axis_scores": r.axis_scores,
+                # Which axes the provider actually disclosed. axis_scores holds
+                # a 0.5 placeholder for the rest, so a consumer that ignores
+                # this cannot distinguish "mediocre" from "unknown".
+                "axis_scored": r.axis_scored,
             }
             for r in response.ranked
         ],
