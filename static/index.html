@@ -391,8 +391,11 @@ function render(data) {
 
   const best = results[0];
   const axes = best.axis_scores || {};
-  const axisHtml = Object.entries(axes).map(([k, v]) =>
-    `<div class="axis-chip">${esc(k.replace("_", " "))}: <span>${v}</span></div>`
+  // Show "no data" rather than the 0.5 placeholder for axes the provider never
+  // disclosed — printing the placeholder states an average the ranker never
+  // actually measured.
+  const axisHtml = Object.keys(axes).map(k =>
+    `<div class="axis-chip">${esc(k.replace("_", " "))}: <span>${esc(axisLabel(best, k))}</span></div>`
   ).join("");
 
   html += `<div class="best-card">
@@ -463,10 +466,42 @@ function scoreBar(score, color) {
 }
 
 // Fix: use index (i === 0) not title equality for winner detection
+// Was this axis actually measured, or is the 0.5 in axis_scores a placeholder?
+// The server sends axis_scored alongside the scores precisely so the UI can
+// tell the difference — plotting an undisclosed axis at 0.5 would draw silence
+// as mediocrity, which is the opposite of how the ranker treats it.
+// Older payloads have no axis_scored; assume measured so nothing regresses.
+function axisWasScored(r, axis) {
+  const mask = r.axis_scored;
+  return !mask || mask[axis] !== false;
+}
+
+// Numeric value for plotting. Unmeasured axes still need a coordinate, so they
+// keep 0.5 — but they are drawn hollow and labelled "no data" on hover, so the
+// position reads as "unknown", not "average".
+function axisValue(r, axis) {
+  const v = (r.axis_scores || {})[axis];
+  return typeof v === "number" ? v : 0.5;
+}
+
+// Hover text. Note `?? `, not `|| ` — a genuine 0.0 is falsy, and `||` would
+// have displayed a real worst-possible score as if it were missing data.
+function axisLabel(r, axis) {
+  if (!axisWasScored(r, axis)) return "no data";
+  const v = (r.axis_scores || {})[axis];
+  return typeof v === "number" ? v.toFixed(2) : "no data";
+}
+
 function render3D(results) {
-  const xs = results.map(r => (r.axis_scores || {}).P1_price    || 0.5);
-  const ys = results.map(r => (r.axis_scores || {}).P2_distance || 0.5);
-  const zs = results.map(r => (r.axis_scores || {}).P3_rating   || 0.5);
+  const xs = results.map(r => axisValue(r, "P1_price"));
+  const ys = results.map(r => axisValue(r, "P2_distance"));
+  const zs = results.map(r => axisValue(r, "P3_rating"));
+  // A result missing any axis is plotted hollow — its position on that axis is
+  // an assumption, not a measurement.
+  const partial = results.map(r =>
+    !axisWasScored(r, "P1_price") ||
+    !axisWasScored(r, "P2_distance") ||
+    !axisWasScored(r, "P3_rating"));
   const colors  = results.map((r, i) => i === 0 ? "#dc2626" : r.sponsored ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
   const sizes   = results.map((r, i) => i === 0 ? 16 : 10);
   const symbols = results.map((r, i) => i === 0 ? "diamond" : r.sponsored ? "x" : "circle");
@@ -496,16 +531,22 @@ function render3D(results) {
     textfont: { size: 12, color: "#dc2626", family: "system-ui, sans-serif" },
     customdata: results.map(r => [
       r.title, r.provider, r.score,
-      (r.axis_scores || {}).P1_price    || "—",
-      (r.axis_scores || {}).P2_distance || "—",
-      (r.axis_scores || {}).P3_rating   || "—",
+      axisLabel(r, "P1_price"),
+      axisLabel(r, "P2_distance"),
+      axisLabel(r, "P3_rating"),
       r.sponsored ? "⚠ sponsored — penalty applied" : "organic",
     ]),
     hovertemplate:
       "<b>%{customdata[0]}</b><br>Provider: %{customdata[1]}<br>Score: %{customdata[2]}<br>" +
       "P1 price: %{customdata[3]}<br>P2 distance: %{customdata[4]}<br>P3 rating: %{customdata[5]}<br>" +
       "<i>%{customdata[6]}</i><extra></extra>",
-    marker: { size: sizes, color: colors, symbol: symbols, opacity: 0.95, line: { color: "#ffffff", width: 1.5 } },
+    marker: {
+      size: sizes, symbol: symbols, opacity: 0.95,
+      // Hollow fill where an axis was never disclosed, so a viewer can see at a
+      // glance which points sit on assumed coordinates.
+      color: colors.map((c, i) => partial[i] ? "rgba(0,0,0,0)" : c),
+      line: { color: colors.map((c, i) => partial[i] ? c : "#ffffff"), width: 1.5 },
+    },
     showlegend: false,
   };
 
@@ -552,14 +593,20 @@ function renderRadar(top3) {
   const axes = ["P1 Price", "P2 Distance", "P3 Rating"];
   const keys = ["P1_price", "P2_distance", "P3_rating"];
   const traces = top3.map((r, i) => {
-    const vals = keys.map(k => (r.axis_scores || {})[k] || 0);
+    // Undisclosed axes plot at the neutral 0.5, not 0 — charting silence as the
+    // worst possible score would misrepresent a provider that simply never
+    // reports distance. The hover says "no data" so the shape isn't read as fact.
+    const vals = keys.map(k => axisValue(r, k));
     vals.push(vals[0]);
+    const labels = keys.map(k => axisLabel(r, k));
+    labels.push(labels[0]);
     const color = i === 0 ? "#dc2626" : (PROVIDER_COLORS[r.provider] || "#6aa9ff");
     return {
       type:"scatterpolar", r:vals, theta:[...axes, axes[0]],
       fill:"toself", fillcolor:color+"30", line:{color, width:2},
       name: r.title.length > 20 ? r.title.slice(0,18)+"…" : r.title,
-      hovertemplate:`<b>${esc(r.title)}</b><br>%{theta}: %{r:.2f}<extra></extra>`,
+      customdata: labels,
+      hovertemplate:`<b>${esc(r.title)}</b><br>%{theta}: %{customdata}<extra></extra>`,
     };
   });
   Plotly.newPlot("plot-radar", traces, {

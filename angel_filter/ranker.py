@@ -97,6 +97,12 @@ class RankedResult:
     rationale: str
     axis_scores: dict[str, float] = field(default_factory=dict)
     consensus_count: int = 0
+    # Which axes the provider actually supplied data for. axis_scores stores a
+    # neutral 0.5 placeholder for the others, so without this a consumer cannot
+    # tell "measured as mediocre" from "never disclosed" — the distinction the
+    # whole missing-data policy rests on. Scoring already computes this; carrying
+    # it on the result lets the UI and API consumers see it too.
+    axis_scored: dict[str, bool] = field(default_factory=dict)
 
 
 # --- Ranker -------------------------------------------------------------------
@@ -338,7 +344,8 @@ def _assemble_score(
     value), the three weights sum to 1.0, and the sponsored penalty is
     subtracted last so an ad is demoted regardless of how well it matches.
     """
-    axis_bonus = _axis_bonus(axis_scores, intent, _axis_scored_mask(r))
+    scored = _axis_scored_mask(r)
+    axis_bonus = _axis_bonus(axis_scores, intent, scored)
     c_factor = min(consensus_count - 1, 2) / 2
     penalty = SPONSORED_PENALTY if r.sponsored else 0.0
 
@@ -355,6 +362,7 @@ def _assemble_score(
         rationale=rationale,
         axis_scores=axis_scores,
         consensus_count=consensus_count,
+        axis_scored=scored,
     )
 
 
