@@ -247,3 +247,142 @@ def test_stub_vectors_straddle_the_fuzzy_threshold():
 
     assert close >= 0.75, f"fixture titles no longer cluster (cosine {close:.3f})"
     assert far < 0.75, f"unrelated fixture titles now cluster (cosine {far:.3f})"
+
+
+# --- Duplicate collapsing -------------------------------------------------------
+# Consensus clustering refuses to group results from the same provider, which is
+# correct for counting agreement and wrong for deduplicating output — nothing
+# collapsed duplicates, so a venue every provider named took one slot per
+# mention. Observed live: "Shake Shack" held three of five. The consensus bonus
+# compounds it, since agreeing copies all score identically and land adjacent.
+
+def _r(title, provider, **kw):
+    return ProviderResult(title=title, snippet=kw.pop("snippet", "s"), provider=provider, **kw)
+
+
+@pytest.mark.asyncio
+async def test_same_venue_from_many_providers_takes_one_slot():
+    from angel_filter.ranker import Ranker
+
+    ranker = Ranker()
+    ranker._ollama_available = False
+    ranker._openai_available = False
+
+    ranked = await ranker.rank(
+        "lunch",
+        [
+            _r("Shake Shack", "openai", price=12.0, rating=4.5),
+            _r("Shake Shack", "gemini", price=12.0, rating=4.5),
+            _r("Shake Shack", "ollama", price=12.0, rating=4.5),
+            _r("Joe's Pizza", "openai", price=10.0, rating=4.4),
+            _r("Katz's Deli", "brave", price=20.0, rating=4.6),
+        ],
+        top_k=5,
+        constraints=QueryConstraints(),
+    )
+
+    titles = [r.result.title for r in ranked]
+    assert len(titles) == len(set(titles)), f"duplicate venues in output: {titles}"
+    assert len(titles) == 3
+
+
+@pytest.mark.asyncio
+async def test_dedup_keeps_the_earned_consensus_count():
+    """Collapsing must not discard the agreement the copies represent.
+
+    The surviving entry stands for all of them, so it keeps the consensus bonus
+    — otherwise deduplicating would silently delete the project's own
+    multi-provider-agreement signal.
+    """
+    from angel_filter.ranker import Ranker
+
+    ranker = Ranker()
+    ranker._ollama_available = False
+    ranker._openai_available = False
+
+    ranked = await ranker.rank(
+        "lunch",
+        [
+            _r("Shake Shack", "openai", price=12.0, rating=4.5),
+            _r("Shake Shack", "gemini", price=12.0, rating=4.5),
+            _r("Shake Shack", "ollama", price=12.0, rating=4.5),
+        ],
+        top_k=5,
+        constraints=QueryConstraints(),
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].consensus_count == 3
+
+
+@pytest.mark.asyncio
+async def test_dedup_keeps_the_best_scoring_copy():
+    """Copies can differ — one provider may report price where another does not.
+
+    Dedup runs after the sort, so the copy retained is the one that scored
+    highest, not whichever happened to arrive first.
+    """
+    from angel_filter.ranker import Ranker
+
+    ranker = Ranker()
+    ranker._ollama_available = False
+    ranker._openai_available = False
+
+    ranked = await ranker.rank(
+        "lunch",
+        [
+            _r("Bar Bao", "openai"),                                # no axis data
+            _r("Bar Bao", "gemini", price=9.0, rating=4.9),         # strong
+        ],
+        top_k=5,
+        constraints=QueryConstraints(budget=15.0, min_rating=4.0),
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].result.price == 9.0, "kept the weaker copy"
+
+
+@pytest.mark.asyncio
+async def test_dedup_matches_on_normalised_title():
+    """Punctuation and casing differences are the same venue."""
+    from angel_filter.ranker import Ranker
+
+    ranker = Ranker()
+    ranker._ollama_available = False
+    ranker._openai_available = False
+
+    ranked = await ranker.rank(
+        "pizza",
+        [
+            _r("Joe's Pizza", "openai", price=10.0),
+            _r("joes pizza", "gemini", price=10.0),
+        ],
+        top_k=5,
+        constraints=QueryConstraints(),
+    )
+
+    assert len(ranked) == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_venues_are_all_kept():
+    """Dedup must not over-collapse — different places stay separate."""
+    from angel_filter.ranker import Ranker
+
+    ranker = Ranker()
+    ranker._ollama_available = False
+    ranker._openai_available = False
+
+    ranked = await ranker.rank(
+        "lunch",
+        [
+            _r("Shake Shack", "openai", price=12.0),
+            _r("Joe's Pizza", "openai", price=10.0),
+            _r("Katz's Deli", "brave", price=20.0),
+            _r("Los Tacos", "gemini", price=9.0),
+        ],
+        top_k=5,
+        constraints=QueryConstraints(),
+    )
+
+    assert len(ranked) == 4

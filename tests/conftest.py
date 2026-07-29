@@ -37,9 +37,17 @@ def _clear_query_cache():
     attributes, so this mirrors it rather than inventing an API.
     """
     from angel_filter.cache import CACHE
+    from angel_filter import geocode
 
-    CACHE._store.clear()
-    CACHE._history.clear()
+    def _reset():
+        CACHE._store.clear()
+        CACHE._history.clear()
+        # The venue-coordinate and locality caches are process-wide and
+        # deliberately outlive a query, so without this a test that geocodes
+        # "Joe's Pizza" makes the next one's lookup count zero.
+        geocode._coord_cache.clear()
+        geocode._locality_cache.clear()
+
+    _reset()
     yield
-    CACHE._store.clear()
-    CACHE._history.clear()
+    _reset()

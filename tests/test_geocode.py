@@ -444,3 +444,183 @@ async def test_orchestrator_skips_locality_without_coordinates(monkeypatch):
     await orch.Orchestrator(providers=[_P()], ranker=_R()).handle_query("lunch")
 
     assert calls["n"] == 0
+
+
+# --- Cost guards ---------------------------------------------------------------
+# A single uncached query fired 17 geocode lookups: the fan-out returns ~40
+# results, the user sees 5, and we were geocoding everything in between. Three
+# layers now bound that — a shortlist, a process-wide venue cache, and a hard
+# ceiling with an off switch.
+
+def _bulk(n, *, strong_upto=0, query_words="lunch spots near me"):
+    out = []
+    for i in range(n):
+        strong = i < strong_upto
+        out.append(ProviderResult(
+            title=f"{'Great' if strong else 'Random'} Place {i}",
+            snippet=query_words if strong else "entirely unrelated filler",
+            provider=f"p{i % 4}",
+            price=12.0 if strong else 90.0,
+            rating=4.8 if strong else 2.9,
+        ))
+    return out
+
+
+def test_shortlist_keeps_the_plausible_candidates():
+    """Spend lookups on results that could actually place, not all 40."""
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.geocode import shortlist_for_enrichment
+
+    results = _bulk(40, strong_upto=12)
+    picked = shortlist_for_enrichment(
+        results, "lunch spots near me", QueryConstraints(budget=20.0), limit=12
+    )
+
+    assert len(picked) == 12
+    assert all(r.title.startswith("Great") for r in picked), (
+        "shortlist dropped strong candidates in favour of weak ones"
+    )
+
+
+def test_shortlist_is_a_noop_below_the_limit():
+    """Small result sets are not worth filtering."""
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.geocode import shortlist_for_enrichment
+
+    results = _bulk(5)
+    assert shortlist_for_enrichment(results, "lunch", QueryConstraints(), limit=12) == results
+
+
+def test_shortlist_always_keeps_already_measured_results():
+    """A Google Places result costs no lookup, so excluding it saves nothing.
+
+    Dropping it would also discard a real measurement in favour of geocoding
+    something else — strictly worse on both axes.
+    """
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.geocode import shortlist_for_enrichment
+
+    # Every other result is a strong match for the query; the measured one is a
+    # deliberately terrible one. On merit it loses the shortlist outright — so
+    # if it survives, it survives *because* it already has a distance.
+    results = _bulk(30, strong_upto=30, query_words="lunch spots near me")
+    measured = ProviderResult(
+        title="Zzz Irrelevant", snippet="nothing to do with the query",
+        provider="google_places", price=999.0, rating=1.0, distance=0.4,
+    )
+    results.append(measured)
+
+    picked = shortlist_for_enrichment(
+        results, "lunch spots near me", QueryConstraints(budget=20.0), limit=5
+    )
+    assert measured in picked, "dropped a result that already had a real measurement"
+
+
+def test_shortlist_leaves_headroom_for_distance_to_reorder():
+    """The shortlist must be well above top_k, not equal to it.
+
+    Distance carries 60% of the axis score on a distance query. A shortlist the
+    size of top_k would fix the winner before the deciding axis was measured.
+    """
+    from angel_filter.geocode import _shortlist_size
+
+    assert _shortlist_size() >= 10
+
+
+@pytest.mark.asyncio
+async def test_second_query_reuses_cached_coordinates(fake_httpx):
+    """The same venue across queries must cost one lookup, not one per query."""
+    client = fake_httpx(_FakeClient({"Joe's Pizza": (NEAR_LAT, NEAR_LNG)}))
+
+    first = [_result("Joe's Pizza")]
+    await enrich_distances(first, USER_LAT, USER_LNG, api_key="k")
+    second = [_result("Joe's Pizza", provider="gemini")]
+    await enrich_distances(second, USER_LAT, USER_LNG, api_key="k")
+
+    assert client.calls == ["Joe's Pizza"], f"re-geocoded a known venue: {client.calls}"
+    assert second[0].distance is not None, "cached coordinates were not applied"
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_names_are_cached_too(fake_httpx):
+    """A name that resolves to nothing must not be retried every query.
+
+    Otherwise a hallucinated venue that appears in every run costs a lookup
+    every run, forever.
+    """
+    client = fake_httpx(_FakeClient({}))
+
+    await enrich_distances([_result("Nowhere Cafe")], USER_LAT, USER_LNG, api_key="k")
+    await enrich_distances([_result("Nowhere Cafe")], USER_LAT, USER_LNG, api_key="k")
+
+    assert client.calls == ["Nowhere Cafe"]
+
+
+@pytest.mark.asyncio
+async def test_lookup_ceiling_bounds_a_pathological_run(fake_httpx, monkeypatch):
+    """Backstop: many distinct venues cannot silently cost 40 calls."""
+    monkeypatch.setenv("ANGEL_GEOCODE_MAX_LOOKUPS", "3")
+    results = [_result(f"Distinct Venue {i}") for i in range(10)]
+    client = fake_httpx(_FakeClient({f"Distinct Venue {i}": (NEAR_LAT, NEAR_LNG) for i in range(10)}))
+
+    await enrich_distances(results, USER_LAT, USER_LNG, api_key="k")
+
+    assert len(client.calls) == 3
+    # Titles past the ceiling stay honestly unscored rather than guessed.
+    assert sum(1 for r in results if r.distance is None) == 7
+
+
+@pytest.mark.asyncio
+async def test_env_flag_disables_enrichment_entirely(fake_httpx, monkeypatch):
+    """The off switch: no calls, no distances, no error."""
+    monkeypatch.setenv("ANGEL_GEOCODE_ENABLED", "false")
+    results = [_result("Joe's Pizza")]
+    client = fake_httpx(_FakeClient({"Joe's Pizza": (NEAR_LAT, NEAR_LNG)}))
+
+    n = await enrich_distances(results, USER_LAT, USER_LNG, api_key="k")
+
+    assert n == 0
+    assert client.calls == []
+    assert results[0].distance is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_enriches_only_the_shortlist(monkeypatch):
+    """Wiring: handle_query must pass a shortlist, not the whole fan-out.
+
+    Testing shortlist_for_enrichment alone proves nothing about whether the
+    orchestrator actually calls it — the same wiring gap that hid the locality
+    bug and the REST priority bug.
+    """
+    import angel_filter.orchestrator as orch
+    from angel_filter.providers.base import BaseProvider
+
+    seen = {}
+
+    async def spy_enrich(results, lat, lng, api_key=None):
+        seen["n"] = len(results)
+        return 0
+
+    monkeypatch.setattr(orch, "enrich_distances", spy_enrich)
+    monkeypatch.setenv("ANGEL_GEOCODE_SHORTLIST", "12")
+
+    bulk = _bulk(40, strong_upto=12)
+
+    class _P(BaseProvider):
+        name = "mock"
+
+        async def query(self, q, max_results=10, constraints=None):
+            return bulk
+
+    class _R:
+        async def rank(self, *a, **k):
+            return []
+
+    await orch.Orchestrator(providers=[_P()], ranker=_R()).handle_query(
+        "lunch spots near me", user_lat=40.758, user_lng=-73.9855
+    )
+
+    assert seen["n"] < len(bulk), (
+        f"enriched all {len(bulk)} results; shortlist not applied"
+    )
+    assert seen["n"] <= 13

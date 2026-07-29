@@ -15,7 +15,11 @@ import logging
 from dataclasses import dataclass
 
 from angel_filter.constraints import QueryConstraints, extract_constraints
-from angel_filter.geocode import describe_location, enrich_distances
+from angel_filter.geocode import (
+    describe_location,
+    enrich_distances,
+    shortlist_for_enrichment,
+)
 from angel_filter.providers.base import BaseProvider, ProviderError, ProviderResult
 from angel_filter.ranker import QueryIntent, RankedResult, Ranker, detect_intent
 
@@ -115,8 +119,16 @@ class Orchestrator:
         # unresolved keeps distance=None and stays honestly unscored on P2.
         if constraints.user_lat is not None and constraints.user_lng is not None:
             try:
+                # Geocoding every result would pay for ~35 answers nobody reads:
+                # the fan-out returns ~40 and the user sees top_k. Spend the
+                # calls on the candidates that could plausibly place, then let
+                # the ranker score the full set — a result outside the shortlist
+                # simply keeps distance=None, exactly as if no provider knew it.
+                candidates = shortlist_for_enrichment(
+                    all_results, user_query, constraints
+                )
                 await enrich_distances(
-                    all_results, constraints.user_lat, constraints.user_lng
+                    candidates, constraints.user_lat, constraints.user_lng
                 )
             except Exception:
                 # Enrichment is an enhancement, never a reason to fail a query.
