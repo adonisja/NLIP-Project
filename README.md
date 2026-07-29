@@ -69,8 +69,12 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
+| Demo UI — demo location presets (privacy for live demos) | **Working** — pins a Manhattan origin; real GPS is never queried |
+| Demo UI — live progress during the query | **Working** |
+| Demo UI — score breakdown on the winner | **Working** — shows the four scoring terms |
+| Demo UI — sponsored demotion callout | **Working** — "would have ranked #1 → penalised to #3" |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **273 passing** |
+| Tests | **277 passing** |
 
 ---
 
@@ -742,7 +746,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 273 tests should pass.
+All 277 tests should pass.
 
 ---
 
@@ -752,7 +756,7 @@ All 273 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-273 tests covering:
+277 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
