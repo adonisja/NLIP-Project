@@ -56,9 +56,14 @@ def build_prompt(
         else ""
     )
 
+    # Prior turns, for a follow-up the deterministic refinement parser did not
+    # recognise. Empty for a first turn and for recognised refinements, so the
+    # common case pays no extra tokens.
+    context_block = f"{c.context_prefix}\n\n" if c.context_prefix else ""
+
     return f"""You are a helpful local recommendations assistant.
 
-User query: {user_query}
+{context_block}User query: {user_query}
 
 {constraints_block}
 

@@ -39,6 +39,10 @@ class QueryConstraints:
     # areas, not decimal coordinates — without it they suggest venues from
     # anywhere. Never parsed from the query text; derived from the coordinates.
     user_locality: str | None = None
+    # Prior conversation turns, prepended to AI provider prompts. Only set for
+    # a multi-turn follow-up the deterministic refinement parser did not match,
+    # so the common case costs no extra prompt tokens.
+    context_prefix: str = ""
 
 
 # --- Regex patterns -----------------------------------------------------------
