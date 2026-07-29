@@ -42,6 +42,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Provider: WatsonX (`granite-13b-instruct-v2`) | **Working** — needs `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` |
 | Provider: Brave Search | **Ready** — needs `BRAVE_API_KEY` |
 | Provider: Google Places (real distance) | **Working** — needs `GOOGLE_PLACES_API_KEY` + user lat/lng |
+| Distance enrichment (geocodes other providers' venues) | **Working** — same key; fills P2 for non-Places results |
 | Provider: Mock (canned lunch data for tests) | **Working** (tests only, not in server build) |
 | Orchestrator (parallel fan-out, failure isolation) | **Working** |
 | Constraint extraction (`$15`, `within 1 mile`, `4 stars`) | **Working** |
@@ -65,7 +66,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **159 passing** |
+| Tests | **203 passing** |
 
 ---
 
@@ -97,21 +98,32 @@ All changes go through pull requests — no direct commits to `main`, including 
     │  Orchestrator                                  │  orchestrator.py
     │   1. extract_constraints()  ($15, 1mi, 4★)     │  constraints.py
     │   2. detect_intent()  — unless "priority" set  │
-    │   3. asyncio.gather() over every provider      │
+    │   3. describe_location()  coords → "Manhattan, │  geocode.py
+    │      NY", injected into the AI prompts         │
+    │   4. asyncio.gather() over every provider      │
     │      a failing provider is isolated, not fatal │
     └─┬────────┬────────┬────────┬───────┬─────────┬─┘
       │        │        │        │       │         │
    OpenAI   Gemini   Ollama  WatsonX   Brave   Google Places    providers/*.py
       │        │        │        │       │         │
-      └────────┴───┬────┴────────┘       │         └── the only source of
-                   │                     │             real distance
+      └────────┴───┬────┴────────┘       │         └── measures distance
+                   │                     │             itself
       price + rating, never distance     └── no structured fields
-      (prompt.py forbids it — the                       │
-       models have no location context)                 │
-                   │                                    │
-      ┌────────────┴────────────────────────────────────┘
-      │  ProviderResult[]  (normalized at this boundary)
-      ▼
+      (told the neighbourhood, not the                  │
+       exact position — we do the                       │
+       measuring)   │                                   │
+                    │                                   │
+       ┌────────────┴───────────────────────────────────┘
+       │  ProviderResult[]  (normalized at this boundary)
+       ▼
+    ┌────────────────────────────────────────────────┐
+    │  Distance enrichment                           │  geocode.py
+    │   for results with no distance, geocode the    │
+    │   venue name and haversine vs. the user;       │
+    │   a name that resolves to something else is    │
+    │   rejected, and unresolved stays None          │
+    └───────────────────┬────────────────────────────┘
+                        ▼
     ┌────────────────────────────────────────────────┐
     │  Ranker                                        │  ranker.py
     │   1. hard constraint filter (>25% over budget, │
@@ -214,10 +226,31 @@ scores 0.0, so the two thresholds agree by construction.
 **Missing data is not mediocre data.** Providers disclose different fields: AI
 providers (OpenAI, Gemini, Ollama, WatsonX) return price and rating but never
 distance — they have no location context and would fabricate it — and Brave
-returns no structured fields at all. The **Google Places** provider is the one
-source of real distance: given the user's coordinates it returns nearby venues
-and computes each one's distance, so P2 actually discriminates on a "nearest"
-query. Scoring an absent axis as a neutral 0.5 would let a bare search result
+returns no structured fields at all — it is a *web* search API, so its results
+are pages, not places, and carry no coordinates to read.
+
+**The models are told where you are.** The browser's coordinates are reverse-
+resolved to a neighbourhood ("Manhattan, NY") and injected into every AI
+provider's prompt. Without it they were being asked for "lunch nearby" with no
+idea where "near" is, and returned invented placeholders — *The Green Bowl*,
+*Taco Haven*, *Bistro Bites* — that geocoded to nothing. With it, the same
+prompt returns *Joe's Pizza*, *Los Tacos No. 1*, *The Halal Guys*. Naming the
+area is not licence to invent distances: the prompt still forbids
+`distance_miles`, because the model knows the neighbourhood, not your position.
+
+**Distance is measured, never guessed.** Two things populate the P2 axis. The
+**Google Places** provider returns nearby venues with coordinates and computes
+each one's distance directly. Then, after fan-out, `geocode.py` resolves
+coordinates for results from *every other* provider that named a venue but
+reported no distance, and haversines them against the user — so an OpenAI or
+Brave result can now score on P2 instead of sitting it out. A title that cannot
+be resolved keeps `distance=None` and stays honestly unscored; a conservative
+filter skips titles that look like articles rather than places ("The 10 Best
+Tacos in Brooklyn" would geocode to *something*, and that something would be
+wrong). Enrichment needs `GOOGLE_PLACES_API_KEY` and a user location; without
+either it is a no-op.
+
+Scoring an absent axis as a neutral 0.5 would let a bare search result
 with no data land within 0.11 of a result that satisfies every constraint,
 which is less than the 0.20 sponsored penalty.
 
@@ -480,6 +513,8 @@ OLLAMA_MODEL=llama3.2:latest
 # Optional
 BRAVE_API_KEY=your-key-here
 GOOGLE_PLACES_API_KEY=your-key-here   # real distance; needs lat/lng per request
+                                      # also powers distance enrichment, which
+                                      # geocodes venues the other providers name
 ```
 
 > **Never commit your `.env` file.** It is already listed in `.gitignore`.
@@ -594,7 +629,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 159 tests should pass.
+All 203 tests should pass.
 
 ---
 
@@ -604,7 +639,7 @@ All 159 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-159 tests covering:
+203 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -640,6 +675,12 @@ python3.12 -m pytest tests/ -v
   re-running every provider, and a different priority keys separately
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
+- The user's locality reaches provider prompts through the orchestrator (the
+  wiring, not just the prompt builder), and is skipped entirely without coords
+- Post-hoc enrichment resolves coordinates for venues other providers named,
+  never overwrites a distance a provider already measured, deduplicates repeat
+  titles to one lookup, survives a failing lookup, skips article-like titles,
+  and leaves anything unresolvable at None rather than defaulting it
 - The NLIP session reads query, preference, and location as separate typed
   submessages (a labeled preference never leaks into the query text), replies
   with both a human-readable summary and a machine-readable JSON submessage
@@ -676,6 +717,7 @@ angel_filter/
   constraints.py        # natural language constraint extraction
   prompt.py             # shared prompt builder for AI providers
   cache.py              # in-memory query cache (3-hour TTL)
+  geocode.py            # post-hoc distance: resolve venue coords, haversine
   auth.py               # GitHub OAuth flow + username allowlist
   limits.py             # per-user rate limit + daily query cap
   providers/
@@ -692,8 +734,9 @@ static/
   login.html            # GitHub sign-in page
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
-  test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
+  test_geocode.py            # 44 tests — distance enrichment, locality, venue filter
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
+  test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
   test_axis_scored_mask.py   # 7 tests — which axes were measured vs. placeholder
   test_health_route.py       # 7 tests — /health ownership vs. nlip_server's router

@@ -31,14 +31,27 @@ from angel_filter.providers.base import BaseProvider, ProviderError, ProviderRes
 
 logger = logging.getLogger(__name__)
 
-_NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+# Places API (New). The legacy maps.googleapis.com/maps/api/place/* endpoints
+# return REQUEST_DENIED on any project created after Google retired them, so a
+# contributor with a fresh key could not use this provider at all.
+# searchText, not searchNearby: the new API's nearby endpoint filters by place
+# *type* and has no free-text field, so it would silently drop the user's query
+# and return generic nearby venues. searchText keeps the query, which is what
+# the legacy `keyword` parameter did.
+_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 _TIMEOUT = 15
 _EARTH_RADIUS_MI = 3958.7613  # mean earth radius in miles
 
-# Places returns price_level as an integer 0-4. Map it to a rough per-person
-# dollar figure so the P1 price axis has something to score. These are
-# deliberately coarse — Places does not expose actual prices.
-_PRICE_LEVEL_TO_USD: dict[int, float] = {0: 0.0, 1: 10.0, 2: 25.0, 3: 50.0, 4: 100.0}
+# The new API returns priceLevel as an enum string rather than the legacy 0-4
+# integer. Map it to a rough per-person dollar figure so the P1 price axis has
+# something to score — deliberately coarse, since Places exposes no real prices.
+_PRICE_LEVEL_TO_USD: dict[str, float] = {
+    "PRICE_LEVEL_FREE": 0.0,
+    "PRICE_LEVEL_INEXPENSIVE": 10.0,
+    "PRICE_LEVEL_MODERATE": 25.0,
+    "PRICE_LEVEL_EXPENSIVE": 50.0,
+    "PRICE_LEVEL_VERY_EXPENSIVE": 100.0,
+}
 
 
 def haversine_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -80,27 +93,42 @@ class GooglePlacesProvider(BaseProvider):
         else:
             radius_m = 5_000
 
-        params = {
-            "location": f"{c.user_lat},{c.user_lng}",
-            "radius": str(radius_m),
-            "keyword": user_query,
-            "key": self._api_key,
+        body = {
+            "textQuery": user_query,
+            # locationBias, not locationRestriction: searchText's restriction
+            # field accepts only a rectangle, and sending a circle there is a
+            # 400 ("Unknown name 'circle' at 'location_restriction'"). Bias takes
+            # the circle and is the right shape for "near me" anyway — results
+            # outside the radius are demoted rather than excluded, and the P2
+            # axis already scores distance properly.
+            "locationBias": {
+                "circle": {
+                    "center": {"latitude": c.user_lat, "longitude": c.user_lng},
+                    "radius": float(radius_m),
+                }
+            },
+            "maxResultCount": min(max_results, 20),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": self._api_key,
+            # The new API bills by requested fields, so ask only for what the
+            # three axes need.
+            "X-Goog-FieldMask": (
+                "places.displayName,places.location,places.rating,"
+                "places.priceLevel,places.formattedAddress"
+            ),
         }
 
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.get(_NEARBY_URL, params=params)
+                resp = await client.post(_SEARCH_URL, json=body, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
+            # Unlike the legacy API, failures come back as HTTP status codes,
+            # which raise_for_status turns into the exception caught here.
             raise ProviderError(f"Google Places request failed: {exc}") from exc
-
-        # Places encodes API-level failures in a status field, not the HTTP code.
-        status = data.get("status", "UNKNOWN")
-        if status not in ("OK", "ZERO_RESULTS"):
-            raise ProviderError(
-                f"Google Places returned status {status}: {data.get('error_message', '')}"
-            )
 
         return _parse_results(data, c.user_lat, c.user_lng, max_results)
 
@@ -112,30 +140,31 @@ def _parse_results(
     max_results: int,
 ) -> list[ProviderResult]:
     results: list[ProviderResult] = []
-    for i, place in enumerate(data.get("results", [])[:max_results]):
-        name = str(place.get("name", "")).strip()
+    # Places API (New) returns "places"; the legacy API returned "results".
+    for i, place in enumerate((data.get("places") or [])[:max_results]):
+        name = str(((place.get("displayName") or {}).get("text") or "")).strip()
         if not name:
             continue
 
-        # Guard against explicit nulls: the API may send "geometry": null or
-        # "location": null, and .get(k, {}) only defaults on a *missing* key,
-        # not a present-but-null one. `or {}` degrades those to no coords
-        # (distance=None) instead of crashing the whole provider.
-        loc = (place.get("geometry") or {}).get("location") or {}
-        lat, lng = loc.get("lat"), loc.get("lng")
+        # Guard against explicit nulls: the API may send "location": null, and
+        # .get(k, {}) only defaults on a *missing* key, not a present-but-null
+        # one. `or {}` degrades those to no coords (distance=None) instead of
+        # crashing the whole provider.
+        loc = place.get("location") or {}
+        lat, lng = loc.get("latitude"), loc.get("longitude")
         distance = (
             round(haversine_miles(user_lat, user_lng, lat, lng), 2)
             if lat is not None and lng is not None
             else None
         )
 
-        price_level = place.get("price_level")
-        price = _PRICE_LEVEL_TO_USD.get(price_level) if price_level is not None else None
+        # priceLevel is now an enum string ("PRICE_LEVEL_MODERATE"), not 0-4.
+        price = _PRICE_LEVEL_TO_USD.get(place.get("priceLevel"))
 
         rating = place.get("rating")
         rating = float(rating) if isinstance(rating, (int, float)) else None
 
-        vicinity = str(place.get("vicinity", "")).strip()
+        vicinity = str(place.get("formattedAddress", "")).strip()
 
         results.append(ProviderResult(
             title=name,

@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 
 from angel_filter.constraints import QueryConstraints, extract_constraints
+from angel_filter.geocode import describe_location, enrich_distances
 from angel_filter.providers.base import BaseProvider, ProviderError, ProviderResult
 from angel_filter.ranker import QueryIntent, RankedResult, Ranker, detect_intent
 
@@ -64,12 +65,23 @@ class Orchestrator:
         constraints.user_lat = user_lat
         constraints.user_lng = user_lng
 
+        # Resolve the coordinates to a neighbourhood *before* fan-out so the AI
+        # providers can put it in their prompts. They previously got no location
+        # at all and suggested venues from anywhere, which is why so many failed
+        # to geocode near the user. Best-effort: None just omits it, as before.
+        if user_lat is not None and user_lng is not None:
+            try:
+                constraints.user_locality = await describe_location(user_lat, user_lng)
+            except Exception:
+                logger.exception("Locality lookup failed; querying without it")
+
         logger.info(
-            "Intent: %s | Constraints: budget=%s, distance=%s, rating=%s",
+            "Intent: %s | Constraints: budget=%s, distance=%s, rating=%s | Locality: %s",
             intent.value,
             constraints.budget,
             constraints.max_distance,
             constraints.min_rating,
+            constraints.user_locality or "unknown",
         )
 
         # Fan out to all providers in parallel, passing constraints so AI
@@ -95,6 +107,20 @@ class Orchestrator:
                 intent=intent,
                 constraints=constraints,
             )
+
+        # Most providers cannot report distance — the AI ones are forbidden from
+        # guessing it and search results have no coordinates — so before this the
+        # P2 axis was populated only by Google Places. Resolve real coordinates
+        # for results that named a venue, then measure. Best-effort: anything
+        # unresolved keeps distance=None and stays honestly unscored on P2.
+        if constraints.user_lat is not None and constraints.user_lng is not None:
+            try:
+                await enrich_distances(
+                    all_results, constraints.user_lat, constraints.user_lng
+                )
+            except Exception:
+                # Enrichment is an enhancement, never a reason to fail a query.
+                logger.exception("Distance enrichment failed; continuing unenriched")
 
         ranked = await self.ranker.rank(
             user_preference or user_query,
