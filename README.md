@@ -32,7 +32,8 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Component | State |
 |---|---|
 | NLIP server (`NLIP_Application` / `NLIP_Session`) | **Working** — the active path; the UI posts to `/nlip/` |
-| FastAPI server (fallback mode) | **Working** — used only if the NLIP libraries fail to import |
+| NLIP — structured replies (text + JSON submessages) | **Working** — ranking returned as machine-readable JSON, not just prose |
+| FastAPI fallback server | **Working** — used only if the NLIP libraries fail to import |
 | GitHub OAuth login + allowlist | **Working** — needs your own OAuth App (see [Authentication](#authentication)) |
 | Per-user rate limit + daily query cap | **Working** |
 | Provider: OpenAI (`gpt-4o-mini`) | **Working** — needs `OPENAI_API_KEY` |
@@ -63,7 +64,8 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
-| Tests | **91 passing** |
+| Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
+| Tests | **106 passing** |
 
 ---
 
@@ -519,13 +521,17 @@ In NLIP mode this returns `nlip_server`'s own health payload:
 {"status": "healthy"}
 ```
 
-> **Note:** `nlip_server.setup_server()` registers its `/health` route before
-> ours, and FastAPI matches the first route registered — so our richer
-> `_health_response` (mode, provider list, uptime) is currently unreachable on
-> the NLIP path. It still serves on the fallback path. Worth reconciling.
+> **Note — this is not our handler.** `nlip_server.setup_server()` registers its
+> own `/health` route before ours, and FastAPI matches the first route
+> registered, so `angel_filter.server.health` is unreachable in NLIP mode. Our
+> richer `_health_response` (`ok`, `mode`, `nlip_available`, `providers`,
+> `uptime_seconds`) only serves on the fallback path. Confirmed by inspecting
+> `app.routes`: index 0 is `nlip_server.routes.health.health_check`, index 1 is
+> ours. Worth reconciling — until then `/health` cannot tell you which providers
+> loaded.
 
 To see which providers actually loaded, check the startup log — the server logs
-each provider it enables — or watch the `providers_used` field in a query
+each provider it enables — or read the `providers_used` field on a query
 response.
 
 Run the test suite (no network or API keys needed):
@@ -537,7 +543,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 91 tests should pass.
+All 106 tests should pass.
 
 ---
 
@@ -547,7 +553,7 @@ All 91 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-91 tests covering:
+106 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -625,7 +631,7 @@ static/
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
-  test_nlip_session.py       # 17 tests — NLIP multipart request/reply handling
+  test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_google_places.py      # 11 tests — Google Places provider + haversine
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
