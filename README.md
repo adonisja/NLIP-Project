@@ -65,7 +65,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **106 passing** |
+| Tests | **133 passing** |
 
 ---
 
@@ -174,6 +174,12 @@ labeled `priority`; the server maps it to a `QueryIntent` and passes it to
 and keeps the inferred behaviour, so the picker is purely additive. An
 unrecognised value logs a warning and falls back to detection rather than
 erroring. Agent clients get the same control by attaching that submessage.
+
+The REST `/query` endpoint accepts the same override as an optional `priority`
+field (`"price"` / `"distance"` / `"rating"`; omit it for auto), so both
+transports rank a request identically. The priority is part of the cache key —
+ranking by price and by rating produce different orderings, so they must not
+share a cached entry.
 
 Hard constraint filtering removes results that are more than 25% over budget
 or more than 0.5★ below the minimum rating before scoring begins. The P3 scale
@@ -543,7 +549,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 106 tests should pass.
+All 133 tests should pass.
 
 ---
 
@@ -553,7 +559,7 @@ All 106 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-106 tests covering:
+133 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -576,6 +582,9 @@ python3.12 -m pytest tests/ -v
   run concurrently (N results ≈ one round-trip, not N)
 - Both scoring paths share one final-score formula (`_assemble_score`); the
   weights, consensus cap, and sponsored penalty are pinned directly
+- REST and NLIP share one priority parser, `POST /query` actually forwards the
+  override to the orchestrator, and the cache key separates priorities so a
+  price ranking is never served from a rating query's entry
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
 - The NLIP session reads query, preference, and location as separate typed
@@ -632,6 +641,7 @@ static/
 tests/
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
+  test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_google_places.py      # 11 tests — Google Places provider + haversine
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
