@@ -190,8 +190,9 @@ async def test_text_only_client_still_gets_a_readable_summary(spy):
 # orchestrator — the plumbing that puts the protocol on the demo's critical path.
 import json as _json
 
+from angel_filter.ranker import QueryIntent
 from angel_filter.server import (
-    _extract_query, _extract_preference, _extract_location,
+    _extract_query, _extract_preference, _extract_location, _extract_priority,
 )
 
 
@@ -265,3 +266,87 @@ async def test_location_only_no_preference(monkeypatch):
 
     assert spy.seen_kwargs["user_preference"] is None
     assert (spy.seen_kwargs["user_lat"], spy.seen_kwargs["user_lng"]) == (1.5, 2.5)
+
+
+# --- Axis priority picker ------------------------------------------------------
+# The UI's picker lets the user name the axis that matters instead of relying on
+# detect_intent() inferring it from query keywords. It rides the protocol as a
+# text submessage labeled "priority". The contract these tests pin: a recognised
+# value becomes a QueryIntent, and *anything else* — absent, misspelled, wrong
+# label — yields None, which handle_query() reads as "fall back to detection".
+# That asymmetry is the safety property: a bad client loses the override, not
+# the query.
+
+def _priority_message(value, label="priority"):
+    m = NLIP_Factory.create_text("lunch spots")
+    m.add_text(value, label=label)
+    return m
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("price",    QueryIntent.PRICE),
+    ("distance", QueryIntent.DISTANCE),
+    ("rating",   QueryIntent.RATING),
+    ("general",  QueryIntent.GENERAL),
+])
+def test_priority_submessage_maps_to_intent(value, expected):
+    assert _extract_priority(_priority_message(value)) is expected
+
+
+@pytest.mark.parametrize("value", ["PRICE", "Distance", "  rating  "])
+def test_priority_is_case_and_whitespace_insensitive(value):
+    """The picker sends lowercase, but a hand-rolled agent client may not."""
+    assert _extract_priority(_priority_message(value)) is not None
+
+
+@pytest.mark.parametrize("bad", ["banana", "", "cheapest", "P1"])
+def test_unrecognised_priority_degrades_to_detection(bad):
+    """An unknown axis must not raise — the query still runs, just auto-detected.
+
+    Returning None (rather than raising) is what keeps a misbehaving client on
+    the old inference path instead of handing it a 500.
+    """
+    assert _extract_priority(_priority_message(bad)) is None
+
+
+def test_priority_ignores_other_labels():
+    """A preference that happens to say 'price' must not become the override.
+
+    The two are separate inputs: preference feeds semantic similarity, priority
+    sets the axis weighting. Reading one as the other would silently couple them.
+    """
+    m = NLIP_Factory.create_text("lunch")
+    m.add_text("price", label="preference")
+    assert _extract_priority(m) is None
+
+
+def test_simple_text_message_has_no_priority():
+    """No submessages at all: the auto path, and no crash on the lookup."""
+    assert _extract_priority(NLIP_Factory.create_text("just pizza")) is None
+
+
+@pytest.mark.asyncio
+async def test_priority_reaches_the_orchestrator(monkeypatch):
+    """End of the wire: a picked axis arrives as handle_query(intent=...)."""
+    spy = _SpyOrchestrator()
+    monkeypatch.setattr(server, "ORCHESTRATOR", spy)
+
+    await _run(_priority_message("distance"))
+
+    assert spy.seen_kwargs["intent"] is QueryIntent.DISTANCE
+
+
+@pytest.mark.asyncio
+async def test_auto_sends_no_intent_so_detection_still_runs(monkeypatch):
+    """The picker's Auto option omits the submessage entirely.
+
+    handle_query() must receive intent=None so detect_intent() decides — this is
+    the guarantee that the picker is additive and the pre-picker behaviour is
+    unchanged for anyone who ignores it.
+    """
+    spy = _SpyOrchestrator()
+    monkeypatch.setattr(server, "ORCHESTRATOR", spy)
+
+    await _run(NLIP_Factory.create_text("cheap lunch nearby"))
+
+    assert spy.seen_kwargs["intent"] is None
