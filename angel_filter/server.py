@@ -36,6 +36,7 @@ from angel_filter.auth import (
 from angel_filter.cache import CACHE
 from angel_filter.limits import daily_budget_status, enforce_query_limits
 from angel_filter.orchestrator import Orchestrator
+from angel_filter.ranker import QueryIntent
 from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
 logger = logging.getLogger(__name__)
@@ -176,21 +177,36 @@ if _NLIP_AVAILABLE:
             logger.info("AngelFilterSession stopped.")
 
         async def execute(self, msg: NLIP_Message) -> NLIP_Message:
-            # Use the SDK's extractor, not str(msg.content). An NLIP_Message is
-            # a multipart structure: a top-level content field PLUS a list of
-            # typed submessages. str(msg.content) only sees the top level, so it
-            # drops text carried in submessages and stringifies a dict content
-            # (e.g. "{'intent': 'search'}") straight into the query.
-            # extract_text() filters to text-format parts and joins them. It
-            # returns None (not "") when the message carries no text at all, so
-            # coerce before stripping.
-            user_query = (msg.extract_text() or "").strip()
-            logger.info("Incoming query: %r", user_query)
+            # An NLIP_Message is multipart: a top-level content field plus a list
+            # of typed submessages. We read three distinct inputs by type/label
+            # rather than flattening everything into one string (which is what
+            # extract_text() does — it would merge the query with the preference):
+            #   query      = the unlabeled text parts (robust to a client that
+            #                sends text as a submessage, not just top-level)
+            #   preference = a text submessage labeled "preference"
+            #   location   = a GPS submessage labeled "user_location"
+            # This is how the demo carries lat/lng through the protocol instead
+            # of a REST side-channel.
+            user_query = _extract_query(msg)
+            preference = _extract_preference(msg)
+            user_lat, user_lng = _extract_location(msg)
+            priority = _extract_priority(msg)
+            logger.info(
+                "NLIP query: %r | preference=%r | loc=(%s,%s) | priority=%s",
+                user_query, preference, user_lat, user_lng,
+                priority.value if priority else "auto",
+            )
             if not user_query:
                 return NLIP_Factory.create_text(
                     "No text query found in the NLIP message."
                 )
-            response = await ORCHESTRATOR.handle_query(user_query=user_query)
+            response = await ORCHESTRATOR.handle_query(
+                user_query=user_query,
+                user_preference=preference,
+                user_lat=user_lat,
+                user_lng=user_lng,
+                intent=priority,
+            )
             # Multipart reply: a human-readable text summary AND a structured
             # JSON submessage carrying the full ranking (scores, axis breakdown,
             # sponsored flags). A text-only client reads extract_text(); an agent
@@ -231,6 +247,9 @@ if _NLIP_AVAILABLE:
     from pydantic import BaseModel
 
     _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+    if _STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     class QueryIn(BaseModel):
         query: str
@@ -467,6 +486,94 @@ else:
     @app.get("/metrics")
     async def metrics(_user: str = Depends(require_session)):
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# --- NLIP message extraction --------------------------------------------------
+# These read the three demo inputs out of an NLIP_Message by type and label.
+# They take the message object directly (duck-typed) so they need no NLIP import
+# and stay unit-testable without booting the server.
+
+_PREFERENCE_LABEL = "preference"
+_LOCATION_LABEL = "user_location"
+_PRIORITY_LABEL = "priority"
+
+
+def _extract_query(msg) -> str:
+    """The user's query: the unlabeled text parts, joined.
+
+    Reading unlabeled text (rather than extract_text(), which would also pull in
+    the labeled preference) keeps the query separate from the other fields while
+    staying robust to a client that puts its text in a submessage instead of the
+    top-level content.
+    """
+    parts: list[str] = []
+    # Top-level content, if it's plain text with no label.
+    if isinstance(msg.content, str) and getattr(msg, "label", None) is None:
+        parts.append(msg.content)
+    for sub in (msg.submessages or []):
+        fmt = str(getattr(sub, "format", "")).lower()
+        if fmt.endswith("text") and getattr(sub, "label", None) is None:
+            if isinstance(sub.content, str):
+                parts.append(sub.content)
+    return " ".join(p.strip() for p in parts if p and p.strip()).strip()
+
+
+def _labeled(msg, label):
+    """find_labeled_submessage, guarded against a None submessages list.
+
+    The SDK's find_labeled_submessage iterates msg.submessages directly, which
+    raises when it's None (a message with no submessages — e.g. a plain text
+    query). Guard so the simple-text client path never crashes here.
+    """
+    if not msg.submessages:
+        return None
+    return msg.find_labeled_submessage(label)
+
+
+def _extract_preference(msg) -> str | None:
+    """A text submessage labeled 'preference', or None."""
+    sub = _labeled(msg, _PREFERENCE_LABEL)
+    if sub is not None and isinstance(sub.content, str) and sub.content.strip():
+        return sub.content.strip()
+    return None
+
+
+def _extract_priority(msg) -> QueryIntent | None:
+    """A text submessage labeled 'priority' naming one axis, or None.
+
+    None means "no explicit choice" — the caller falls back to keyword
+    detection. An unrecognised value is treated the same way rather than
+    raising: a client sending garbage gets the old auto behaviour, not a 500.
+    """
+    sub = _labeled(msg, _PRIORITY_LABEL)
+    if sub is None or not isinstance(sub.content, str):
+        return None
+    try:
+        return QueryIntent(sub.content.strip().lower())
+    except ValueError:
+        logger.warning("Unrecognised priority %r — falling back to detection", sub.content)
+        return None
+
+
+def _extract_location(msg) -> tuple[float | None, float | None]:
+    """A GPS submessage labeled 'user_location' -> (lat, lng), or (None, None).
+
+    The content is a JSON string like {"lat": .., "lng": ..}. Malformed or
+    partial payloads degrade to (None, None) rather than raising — location is
+    an optional signal, and a bad one must not fail the whole query.
+    """
+    sub = _labeled(msg, _LOCATION_LABEL)
+    if sub is None or not isinstance(sub.content, str):
+        return None, None
+    try:
+        import json
+        data = json.loads(sub.content)
+        lat, lng = data.get("lat"), data.get("lng")
+        if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+            return float(lat), float(lng)
+    except (ValueError, TypeError, AttributeError):
+        logger.info("Ignoring malformed NLIP location payload: %r", sub.content)
+    return None, None
 
 
 # --- Helpers ------------------------------------------------------------------

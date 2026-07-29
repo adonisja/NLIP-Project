@@ -45,12 +45,19 @@ class Orchestrator:
         top_k: int = 5,
         user_lat: float | None = None,
         user_lng: float | None = None,
+        intent: QueryIntent | None = None,
     ) -> OrchestratorResponse:
-        """Run the full pipeline: extract constraints → detect intent → fan out → rank."""
+        """Run the full pipeline: extract constraints → detect intent → fan out → rank.
+
+        `intent` overrides keyword detection when the caller states a priority
+        explicitly (the UI's axis picker). Left as None, the intent is inferred
+        from the query text exactly as before.
+        """
 
         # Combine query + preference so signals in either field are captured
         full_text   = f"{user_query} {user_preference or ''}".strip()
-        intent      = detect_intent(full_text)
+        if intent is None:
+            intent = detect_intent(full_text)
         constraints = extract_constraints(full_text)
         # Location comes from the request, not the query text — attach it so
         # location-aware providers (Google Places) can measure distance.
