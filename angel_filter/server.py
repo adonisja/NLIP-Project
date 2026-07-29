@@ -217,21 +217,40 @@ if _NLIP_AVAILABLE:
                 return NLIP_Factory.create_text(
                     "No text query found in the NLIP message."
                 )
-            response = await ORCHESTRATOR.handle_query(
-                user_query=user_query,
-                user_preference=preference,
-                user_lat=user_lat,
-                user_lng=user_lng,
-                intent=priority,
+
+            # Cache on the same (query, composed-preference) key the REST path
+            # uses, so the two transports share entries instead of each paying
+            # for a fan-out the other already did. Until this was added the NLIP
+            # path — the active one — never touched the cache at all: /history
+            # was always empty and repeating a query re-queried every provider.
+            cache_pref = _cache_pref(
+                preference, user_lat, user_lng,
+                priority.value if priority else None,
             )
+            payload = CACHE.get(user_query, cache_pref)
+            if payload is None:
+                response = await ORCHESTRATOR.handle_query(
+                    user_query=user_query,
+                    user_preference=preference,
+                    user_lat=user_lat,
+                    user_lng=user_lng,
+                    intent=priority,
+                )
+                payload = _serialize_response(response)
+                CACHE.set(user_query, cache_pref, {**payload, "cached": True})
+                summary = _format_reply(response)
+            else:
+                logger.info("Cache hit for NLIP query: %r", user_query)
+                summary = _format_reply_from_payload(payload)
+
             # Multipart reply: a human-readable text summary AND a structured
             # JSON submessage carrying the full ranking (scores, axis breakdown,
             # sponsored flags). A text-only client reads extract_text(); an agent
             # reads the JSON via extract_field_list("structured", "JSON") and gets
             # machine-readable data — including the sponsored flag, which is the
             # project's thesis — instead of having to parse it out of prose.
-            reply = NLIP_Factory.create_text(_format_reply(response))
-            reply.add_json(_serialize_response(response))
+            reply = NLIP_Factory.create_text(summary)
+            reply.add_json(payload)
             return reply
 
 
@@ -370,6 +389,21 @@ if _NLIP_AVAILABLE:
                 QUERY_COUNT.labels(status="error").inc()
                 raise
         return _serialize_response(response)
+
+    # These two existed only in the fallback branch, so in NLIP mode — the path
+    # that actually runs — they 404'd: the UI's "Recent queries" button was dead
+    # and there was no way to clear a stale cache. Both require a session; the
+    # fallback copies predate the auth layer and are left as-is only because
+    # that branch is demo insurance, not the deployed path.
+    @app.get("/history")
+    async def history(_user: str = Depends(require_session)):
+        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+
+    @app.post("/cache/clear")
+    async def cache_clear(_user: str = Depends(require_session)):
+        CACHE._store.clear()
+        CACHE._history.clear()
+        return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
     async def metrics(_user: str = Depends(require_session)):
@@ -689,22 +723,33 @@ def _cache_pref(
     return base
 
 
-def _format_reply(response) -> str:
-    if not response.ranked:
-        return "No results from any provider. Providers tried: " + ", ".join(
-            response.providers_used + response.providers_failed
-        )
-    lines = [f"Ranked {len(response.ranked)} results "
-             f"(providers used: {', '.join(response.providers_used)}):"]
-    for i, r in enumerate(response.ranked, start=1):
-        src = r.result.provider
-        tag = " [SPONSORED]" if r.result.sponsored else ""
-        lines.append(f"{i}. {r.result.title}{tag} — {src} — {r.rationale}")
-        if r.result.url:
-            lines.append(f"   {r.result.url}")
-    if response.providers_failed:
-        lines.append("(failed: " + ", ".join(response.providers_failed) + ")")
+def _format_reply_from_payload(payload: dict) -> str:
+    """Human-readable summary built from the serialised response.
+
+    Works off the payload rather than an OrchestratorResponse so a cache hit —
+    which only has the stored dict — produces byte-identical text to a fresh
+    query. Duplicating this formatting for the cached case is how the two would
+    drift.
+    """
+    used = payload.get("providers_used", [])
+    failed = payload.get("providers_failed", [])
+    results = payload.get("results", [])
+    if not results:
+        return "No results from any provider. Providers tried: " + ", ".join(used + failed)
+    lines = [f"Ranked {len(results)} results (providers used: {', '.join(used)}):"]
+    for i, r in enumerate(results, start=1):
+        tag = " [SPONSORED]" if r.get("sponsored") else ""
+        lines.append(f"{i}. {r.get('title')}{tag} — {r.get('provider')} — {r.get('rationale')}")
+        if r.get("url"):
+            lines.append(f"   {r['url']}")
+    if failed:
+        lines.append("(failed: " + ", ".join(failed) + ")")
     return "\n".join(lines)
+
+
+def _format_reply(response) -> str:
+    """Summary for a fresh OrchestratorResponse — one hop to the shared formatter."""
+    return _format_reply_from_payload(_serialize_response(response))
 
 
 if __name__ == "__main__":

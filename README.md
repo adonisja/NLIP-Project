@@ -55,76 +55,102 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Ranker — hard constraint filtering | **Working** |
 | Ranker — fuzzy consensus clustering | **Working** |
 | Ranker — sponsored content penalty | **Working** |
-| Query result cache (3-hour TTL, 10 query history) | **Working** |
+| Query result cache (3-hour TTL, 10 query history) | **Working** — shared by both the NLIP and REST paths |
 | `GET /health` | **Working** |
 | `GET /metrics` (Prometheus) | **Working** |
-| `GET /history` (recent queries) | **Working** |
-| `POST /cache/clear` | **Working** |
+| `GET /history` (recent queries) | **Working** — requires a session |
+| `POST /cache/clear` | **Working** — requires a session |
 | Demo UI — ranked results with score bars | **Working** |
 | Demo UI — 3D scoring space (Plotly) | **Working** |
 | Demo UI — radar chart (top 3 comparison) | **Working** |
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **191 passing** |
+| Tests | **203 passing** |
 
 ---
 
 ## Architecture
 
 ```
-    user (browser)
-          │
-          │  POST /query
-          ▼
-    ┌─────────────────────────────┐
-    │     FastAPI server          │   angel_filter/server.py
-    │     + Query cache (3hr TTL) │   angel_filter/cache.py
-    └─────────────┬───────────────┘
-                  │
-                  ▼
-    ┌─────────────────────────────┐
-    │       Orchestrator          │   angel_filter/orchestrator.py
-    │  1. extract_constraints()   │   angel_filter/constraints.py
-    │  2. detect_intent()         │
-    │  3. describe_location()     │   angel_filter/geocode.py
-    │     coords → "Manhattan, NY"│   (goes into the AI prompts)
-    │  4. fan-out in parallel     │
-    └──┬──────┬──────┬──────┬────┘
-       │      │      │      │
-   OpenAI  Gemini Ollama WatsonX     angel_filter/providers/*.py
-       │      │      │      │        (Brave, Google Places also available)
-       └──────┴──┬───┴──────┘
-                 │  normalized ProviderResult list
-                 ▼
-    ┌─────────────────────────────┐
-    │   Distance enrichment       │   angel_filter/geocode.py
-    │   resolve venue coords for  │
-    │   results with no distance, │
-    │   haversine vs. the user;   │
-    │   unresolved stays None     │
-    └─────────────┬───────────────┘
-                  ▼
-    ┌─────────────────────────────┐
-    │          Ranker             │   angel_filter/ranker.py
-    │  1. hard constraint filter  │
-    │  2. Ollama embeddings       │
-    │     → semantic similarity   │
-    │  3. P1/P2/P3 axis scoring   │
-    │  4. fuzzy consensus cluster │
-    │  5. sponsored penalty       │
-    └─────────────┬───────────────┘
-                  │  RankedResult list
-                  ▼
-    ┌─────────────────────────────┐
-    │       Demo UI               │   static/index.html
-    │  - ranked result cards      │
-    │  - score bars               │
-    │  - 3D scoring space         │
-    │  - radar chart              │
-    │  - provider breakdown       │
-    │  - query history            │
-    └─────────────────────────────┘
+                       user (browser)
+                             │
+              GitHub OAuth ──┤  no session? → /login → GitHub → allowlist
+              auth.py        │                        (ANGEL_ALLOWED_USERS)
+                             ▼
+    ┌────────────────────────────────────────────────┐
+    │  POST /nlip/          NLIP_Session.execute()   │  server.py
+    │                                                │
+    │  Multipart NLIP_Message in, by label:          │
+    │    (unlabeled text) → query                    │
+    │    "preference"     → similarity target        │
+    │    "user_location"  → lat/lng                  │
+    │    "priority"       → axis override            │
+    │                                                │
+    │  rate limit + daily cap ─── limits.py          │
+    │  query cache (3h TTL) ───── cache.py           │
+    │    on a hit the stored payload is returned     │
+    │    here — everything below is skipped          │
+    └───────────────────┬────────────────────────────┘
+                        │  cache miss
+                        ▼
+    ┌────────────────────────────────────────────────┐
+    │  Orchestrator                                  │  orchestrator.py
+    │   1. extract_constraints()  ($15, 1mi, 4★)     │  constraints.py
+    │   2. detect_intent()  — unless "priority" set  │
+    │   3. describe_location()  coords → "Manhattan, │  geocode.py
+    │      NY", injected into the AI prompts         │
+    │   4. asyncio.gather() over every provider      │
+    │      a failing provider is isolated, not fatal │
+    └─┬────────┬────────┬────────┬───────┬─────────┬─┘
+      │        │        │        │       │         │
+   OpenAI   Gemini   Ollama  WatsonX   Brave   Google Places    providers/*.py
+      │        │        │        │       │         │
+      └────────┴───┬────┴────────┘       │         └── measures distance
+                   │                     │             itself
+      price + rating, never distance     └── no structured fields
+      (told the neighbourhood, not the                  │
+       exact position — we do the                       │
+       measuring)   │                                   │
+                    │                                   │
+       ┌────────────┴───────────────────────────────────┘
+       │  ProviderResult[]  (normalized at this boundary)
+       ▼
+    ┌────────────────────────────────────────────────┐
+    │  Distance enrichment                           │  geocode.py
+    │   for results with no distance, geocode the    │
+    │   venue name and haversine vs. the user;       │
+    │   a name that resolves to something else is    │
+    │   rejected, and unresolved stays None          │
+    └───────────────────┬────────────────────────────┘
+                        ▼
+    ┌────────────────────────────────────────────────┐
+    │  Ranker                                        │  ranker.py
+    │   1. hard constraint filter (>25% over budget, │
+    │      >0.5★ under minimum → dropped)            │
+    │   2. embed: Ollama → OpenAI → keyword overlap  │
+    │   3. fuzzy consensus clusters (cos ≥ 0.75)     │
+    │   4. per-result scoring:                       │
+    │        0.50 × similarity                       │
+    │      + 0.35 × axis (P1/P2/P3, intent-weighted, │
+    │                renormalized over real axes)    │
+    │      + 0.15 × consensus (capped at 2)          │
+    │      − 0.20 if sponsored                       │
+    └───────────────────┬────────────────────────────┘
+                        │  RankedResult[] → _serialize_response()
+                        ▼  text summary + structured JSON submessage
+    ┌────────────────────────────────────────────────┐
+    │  Demo UI                                       │  static/index.html
+    │   ranked cards · P1/P2/P3 chips · score bars   │
+    │   3D scoring space · radar · provider panel    │
+    │   priority picker · query history              │
+    └────────────────────────────────────────────────┘
+
+  Also on the server:  GET /health · GET /metrics (Prometheus)
+                       GET /history · POST /cache/clear     (session required)
+
+  POST /query is the same pipeline over plain REST — the fallback FastAPI
+  app in server.py, used only if the NLIP libraries fail to import.
 ```
 
 ---
@@ -603,7 +629,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 191 tests should pass.
+All 203 tests should pass.
 
 ---
 
@@ -613,7 +639,7 @@ All 191 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-191 tests covering:
+203 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -643,6 +669,10 @@ python3.12 -m pytest tests/ -v
   serialisation, so the UI can distinguish a placeholder from a measurement
 - `/health` is ours in NLIP mode (upstream's router no longer shadows it) while
   its `/health/live` and `/health/ready` probes still respond
+- Both branches of the `_NLIP_AVAILABLE` if/else declare the same routes, each
+  registered exactly once, with the diagnostic ones behind a session
+- The NLIP session caches: a repeated query reuses the stored payload instead of
+  re-running every provider, and a different priority keys separately
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
 - The user's locality reaches provider prompts through the orchestrator (the
@@ -704,11 +734,13 @@ static/
   login.html            # GitHub sign-in page
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
-  test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
+  test_geocode.py            # 44 tests — distance enrichment, locality, venue filter
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
+  test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
   test_axis_scored_mask.py   # 7 tests — which axes were measured vs. placeholder
   test_health_route.py       # 7 tests — /health ownership vs. nlip_server's router
+  test_route_parity.py       # 12 tests — both branches expose the same routes; NLIP caching
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
   test_google_places.py      # 11 tests — Google Places provider + haversine
   test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
