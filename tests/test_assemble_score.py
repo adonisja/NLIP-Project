@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from angel_filter.constraints import QueryConstraints
 from angel_filter.providers.base import ProviderResult
 from angel_filter.ranker import (
     W_AXIS,
@@ -20,6 +21,7 @@ from angel_filter.ranker import (
     _assemble_score,
     _axis_bonus,
     _axis_scored_mask,
+    _compute_gap_scores,
 )
 
 
@@ -82,3 +84,58 @@ def test_score_is_rounded_to_four_places():
         _result(price=1.0, rating=3.0), 0.123456, axis_scores, 1, QueryIntent.GENERAL, "w"
     )
     assert result.score == round(result.score, 4)
+
+
+# --- Score breakdown -----------------------------------------------------------
+# _assemble_score computed all four terms and discarded them, leaving the UI with
+# a bare 0.82 and no way to show what drove it — including the sponsored penalty,
+# which is the project's thesis.
+
+def test_breakdown_terms_sum_to_the_score():
+    """The published arithmetic must actually reconstruct the score.
+
+    If these drift, the UI shows a breakdown that does not add up to the number
+    printed beside it.
+    """
+    r = ProviderResult(title="x", snippet="s", provider="p", price=10.0, rating=4.5)
+    ranked = _assemble_score(r, 0.7, _compute_gap_scores(r, QueryConstraints(budget=15.0)),
+                             2, QueryIntent.PRICE, "why")
+    b = ranked.score_breakdown
+
+    total = (b["similarity_weighted"] + b["axis_weighted"]
+             + b["consensus_weighted"] - b["sponsored_penalty"])
+    assert total == pytest.approx(ranked.score, abs=0.001)
+
+
+def test_breakdown_reports_the_sponsored_penalty():
+    """The penalty must be visible as its own term, not folded into the total."""
+    r = ProviderResult(title="x", snippet="s", provider="p", price=10.0,
+                       rating=4.5, sponsored=True)
+    ranked = _assemble_score(r, 0.7, _compute_gap_scores(r, QueryConstraints(budget=15.0)),
+                             1, QueryIntent.PRICE, "why")
+
+    assert ranked.score_breakdown["sponsored_penalty"] == pytest.approx(SPONSORED_PENALTY)
+
+
+def test_breakdown_penalty_is_zero_for_organic_results():
+    r = ProviderResult(title="x", snippet="s", provider="p", price=10.0, rating=4.5)
+    ranked = _assemble_score(r, 0.7, _compute_gap_scores(r, QueryConstraints(budget=15.0)),
+                             1, QueryIntent.PRICE, "why")
+
+    assert ranked.score_breakdown["sponsored_penalty"] == 0.0
+
+
+def test_breakdown_survives_serialisation():
+    """The UI cannot show the arithmetic if the API does not ship it."""
+    import angel_filter.server as server
+    from angel_filter.orchestrator import OrchestratorResponse
+
+    r = ProviderResult(title="x", snippet="s", provider="p", price=10.0, rating=4.5)
+    ranked = _assemble_score(r, 0.7, _compute_gap_scores(r, QueryConstraints(budget=15.0)),
+                             1, QueryIntent.PRICE, "why")
+    payload = server._serialize_response(OrchestratorResponse(
+        ranked=[ranked], providers_used=["p"], providers_failed=[],
+        intent=QueryIntent.PRICE, constraints=QueryConstraints(),
+    ))
+
+    assert payload["results"][0]["score_breakdown"] == ranked.score_breakdown

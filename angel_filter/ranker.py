@@ -103,6 +103,11 @@ class RankedResult:
     # whole missing-data policy rests on. Scoring already computes this; carrying
     # it on the result lets the UI and API consumers see it too.
     axis_scored: dict[str, bool] = field(default_factory=dict)
+    # The four scoring terms behind `score`, each already multiplied by its
+    # weight. _assemble_score computes all of them and previously threw them
+    # away, leaving the UI with a bare 0.82 and no way to show what drove it —
+    # including the sponsored penalty, which is the project's whole thesis.
+    score_breakdown: dict[str, float] = field(default_factory=dict)
 
 
 # --- Ranker -------------------------------------------------------------------
@@ -364,6 +369,17 @@ def _assemble_score(
         axis_scores=axis_scores,
         consensus_count=consensus_count,
         axis_scored=scored,
+        # Raw 0-1 value and weighted contribution for each term, so a consumer
+        # can show the arithmetic rather than restating the total.
+        score_breakdown={
+            "similarity": round(similarity, 4),
+            "similarity_weighted": round(W_SIMILARITY * similarity, 4),
+            "axis": round(axis_bonus, 4),
+            "axis_weighted": round(W_AXIS * axis_bonus, 4),
+            "consensus": round(c_factor, 4),
+            "consensus_weighted": round(W_CONSENSUS * c_factor, 4),
+            "sponsored_penalty": round(penalty, 4),
+        },
     )
 
 

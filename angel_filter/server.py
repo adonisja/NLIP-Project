@@ -789,6 +789,7 @@ def _serialize_response(response) -> dict:
                 "distance": r.result.distance,
                 "rating": r.result.rating,
                 "axis_scores": r.axis_scores,
+                "score_breakdown": r.score_breakdown,
                 # Which axes the provider actually disclosed. axis_scores holds
                 # a 0.5 placeholder for the rest, so a consumer that ignores
                 # this cannot distinguish "mediocre" from "unknown".

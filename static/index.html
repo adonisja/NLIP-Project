@@ -131,6 +131,47 @@
   .refine-banner { background: #16233a; border: 1px solid #2a4a7a; border-radius: 10px; padding: 10px 16px; margin-bottom: 14px; font-size: 13px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
   .refine-banner-icon { font-size: 15px; flex-shrink: 0; }
 
+  /* Demo location picker */
+  .loc-bar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; }
+  .loc-status { color: var(--muted); margin-right: 4px; }
+  .loc-bar.demo-active .loc-status { color: var(--warn); font-weight: 600; }
+  .loc-btn { background: #1a2032; border: 1px solid var(--border); color: var(--muted); font: inherit; font-size: 12px; border-radius: 999px; padding: 4px 11px; cursor: pointer; transition: all 0.15s; }
+  .loc-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .loc-btn.active { border-color: var(--warn); color: var(--warn); background: #2a2216; font-weight: 600; }
+
+  /* Live progress while providers are still answering */
+  .progress { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; margin-bottom: 14px; }
+  .progress-title { font-size: 13px; color: var(--ink); margin-bottom: 10px; font-weight: 600; }
+  .progress-row { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); padding: 3px 0; }
+  .progress-icon { width: 15px; text-align: center; flex-shrink: 0; }
+  .progress-row.done { color: var(--good); }
+  .progress-row.active { color: var(--accent); }
+  .progress-row.failed { color: var(--warn); }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #2a3450; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Score breakdown — the arithmetic behind the number */
+  .breakdown { background: #141a29; border: 1px solid var(--border); border-radius: 10px; padding: 11px 14px; margin: 10px 0; font-size: 12px; }
+  .breakdown-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; color: var(--muted); }
+  .breakdown-term { flex: 1; }
+  .breakdown-calc { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .breakdown-val { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); min-width: 52px; text-align: right; }
+  .breakdown-row.penalty .breakdown-val, .breakdown-row.penalty .breakdown-term { color: var(--warn); }
+  .breakdown-total { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 7px; font-weight: 700; color: var(--ink); }
+
+  /* Sponsored demotion callout — the thesis, made visible */
+  .demotion { background: #3a2a1a; border: 1px solid #b45708; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-size: 13px; color: var(--warn); }
+  .demotion-head { font-weight: 700; margin-bottom: 5px; display: flex; align-items: center; gap: 7px; }
+  .demotion-body { color: #e8c9a0; line-height: 1.5; }
+  .demotion-move { font-variant-numeric: tabular-nums; font-weight: 700; color: #fff; }
+
+  /* Empty / failure state */
+  .empty-state { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px; text-align: center; }
+  .empty-icon { font-size: 30px; margin-bottom: 10px; }
+  .empty-title { font-size: 15px; color: var(--ink); font-weight: 600; margin-bottom: 6px; }
+  .empty-body { font-size: 13px; color: var(--muted); line-height: 1.6; max-width: 460px; margin: 0 auto; }
+  .empty-body code { background: #202840; padding: 1px 5px; border-radius: 4px; }
+
   /* Sponsored penalty banner */
   .penalty-banner { background: #3a2a1a; border: 1px solid #b4570844; border-radius: 10px; padding: 10px 16px; margin-bottom: 14px; font-size: 13px; color: var(--warn); display: flex; align-items: center; gap: 8px; }
   .penalty-banner-icon { font-size: 16px; flex-shrink: 0; }
@@ -157,6 +198,16 @@
     </div>
     <span class="label">What matters most to you? (optional)</span>
     <input id="p" placeholder='e.g. "quiet place to work"' />
+    <!-- Demo location. Distance scoring stays live; only the origin is
+         substituted, so a presenter never puts their real position on screen. -->
+    <div id="loc-bar" class="loc-bar">
+      <span id="loc-status" class="loc-status">Using your real location</span>
+      <button type="button" class="loc-btn" data-loc="">📍 Real</button>
+      <button type="button" class="loc-btn" data-loc="midtown">🗽 Midtown</button>
+      <button type="button" class="loc-btn" data-loc="downtown">🏙 Downtown</button>
+      <button type="button" class="loc-btn" data-loc="uptown">🎷 Uptown</button>
+    </div>
+
     <span class="label">Priority</span>
     <div class="priority-picker" id="priority-picker">
       <button type="button" class="priority-btn active" data-priority="auto">✨ Auto-detect</button>
@@ -250,7 +301,112 @@ document.getElementById("priority-picker").addEventListener("click", (e) => {
   selectedPriority = btn.dataset.priority;
 });
 
+// --- Progress while the query runs -------------------------------------------
+// A cold query takes 25-45s and the UI previously showed one static line for
+// all of it — the longest dead air in a live demo.
+//
+// The NLIP call is a single request/response, so there is no per-provider
+// completion event to subscribe to. Rather than fake ticks the server never
+// sent, this shows the *stages* the pipeline genuinely runs in order, advancing
+// on elapsed time and settling on the last stage until the real response lands.
+// Provider names come from /health, so the list is what is actually configured.
+
+let _providerNames = null;
+let _progressTimer = null;
+
+async function knownProviders() {
+  if (_providerNames) return _providerNames;
+  try {
+    const h = await fetch("/health").then(r => r.json());
+    _providerNames = h.providers || [];
+  } catch { _providerNames = []; }
+  return _providerNames;
+}
+
+const PROGRESS_STAGES = [
+  { at: 0,     text: p => `Asking ${p.length || "all"} providers in parallel` },
+  { at: 6000,  text: () => "Collecting and normalising results" },
+  { at: 14000, text: () => "Measuring real distances from your location" },
+  { at: 22000, text: () => "Scoring: similarity · axes · consensus · sponsored penalty" },
+];
+
+async function startProgress() {
+  const providers = await knownProviders();
+  const rows = PROGRESS_STAGES.map((s, i) =>
+    `<div class="progress-row" data-stage="${i}">
+       <span class="progress-icon">○</span><span>${esc(s.text(providers))}</span>
+     </div>`).join("");
+  out.innerHTML = `<div class="progress">
+    <div class="progress-title">Angel Filter is working…</div>
+    ${rows}
+    ${providers.length ? `<div class="progress-row" style="margin-top:8px;font-size:12px">
+      <span class="progress-icon"></span><span>${esc(providers.join(" · "))}</span></div>` : ""}
+  </div>`;
+
+  const t0 = Date.now();
+  const tick = () => {
+    const elapsed = Date.now() - t0;
+    let current = 0;
+    PROGRESS_STAGES.forEach((s, i) => { if (elapsed >= s.at) current = i; });
+    document.querySelectorAll(".progress-row[data-stage]").forEach(row => {
+      const i = Number(row.dataset.stage);
+      const icon = row.querySelector(".progress-icon");
+      row.classList.toggle("done", i < current);
+      row.classList.toggle("active", i === current);
+      icon.innerHTML = i < current ? "✓" : i === current ? `<span class="spinner"></span>` : "○";
+    });
+  };
+  tick();
+  _progressTimer = setInterval(tick, 400);
+}
+
+function stopProgress() {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
+}
+
+// Demo location. Presenting to a room means the browser's real GPS fix would
+// be shown on screen and sent to the providers — so this pins a fixed Manhattan
+// origin instead. Distance scoring stays fully live; only the origin is
+// substituted, and the badge makes it obvious which one is in use.
+const DEMO_LOCATIONS = {
+  midtown:   { lat: 40.7580, lng: -73.9855, label: "Times Square, Manhattan" },
+  downtown:  { lat: 40.7061, lng: -74.0087, label: "Financial District, Manhattan" },
+  uptown:    { lat: 40.8116, lng: -73.9465, label: "Harlem, Manhattan" },
+};
+const DEMO_LOC_KEY = "angel_filter_demo_location";
+
+function demoLocation() {
+  const key = sessionStorage.getItem(DEMO_LOC_KEY);
+  return key ? DEMO_LOCATIONS[key] || null : null;
+}
+
+function setDemoLocation(key) {
+  if (key) sessionStorage.setItem(DEMO_LOC_KEY, key);
+  else sessionStorage.removeItem(DEMO_LOC_KEY);
+  renderLocationBar();
+}
+
+function renderLocationBar() {
+  const bar = document.getElementById("loc-bar");
+  if (!bar) return;
+  const active = demoLocation();
+  document.getElementById("loc-status").textContent = active
+    ? `Using demo location: ${active.label}`
+    : "Using your real location";
+  bar.classList.toggle("demo-active", !!active);
+  bar.querySelectorAll(".loc-btn").forEach(b => {
+    const k = b.dataset.loc || "";
+    const cur = sessionStorage.getItem(DEMO_LOC_KEY) || "";
+    b.classList.toggle("active", k === cur);
+  });
+}
+
 function getUserLocation() {
+  // A pinned demo location short-circuits the browser prompt entirely, so
+  // nothing asks for — or reveals — the presenter's real position.
+  const demo = demoLocation();
+  if (demo) return Promise.resolve({ lat: demo.lat, lng: demo.lng });
+
   return new Promise((resolve) => {
     if (!("geolocation" in navigator)) { resolve(null); return; }
     navigator.geolocation.getCurrentPosition(
@@ -345,6 +501,16 @@ function renderConversationBar() {
   go.textContent = turnMode === "continue" ? "Refine results" : "Ask Angel Filter";
 }
 
+// Delegated so the whole bar handles its buttons. Registered at top level: an
+// earlier version ended up nested inside another function, so it never ran
+// until a query had completed and the buttons did nothing on a fresh page.
+document.getElementById("loc-bar").addEventListener("click", (e) => {
+  const btn = e.target.closest(".loc-btn");
+  if (!btn) return;
+  setDemoLocation(btn.dataset.loc || null);
+});
+renderLocationBar();
+
 document.getElementById("convo-bar").addEventListener("click", (e) => {
   const btn = e.target.closest(".convo-btn");
   if (!btn) return;
@@ -428,7 +594,7 @@ form.addEventListener("submit", async (e) => {
   btn.disabled = true;
   vizWrap.style.display = "none";
   document.getElementById("plot-3d").classList.remove("loaded");
-  out.innerHTML = `<div class="meta">Querying providers…</div>`;
+  startProgress();
 
   try {
     // Ask for location before firing the query. Resolves to null if the user
@@ -474,6 +640,7 @@ form.addEventListener("submit", async (e) => {
   } catch (err) {
     out.innerHTML = `<div class="card error">Request failed: ${esc(err.message)}</div>`;
   } finally {
+    stopProgress();
     btn.disabled = false;
     // renderConversationBar owns the button's enabled state once a conversation
     // exists, so let it have the last word rather than leaving it force-enabled.
@@ -532,19 +699,32 @@ function render(data) {
   }
 
   if (!results.length) {
-    html += `<div class="card">No results returned.</div>`;
+    // Every provider failing mid-demo is the worst moment to show a bare
+    // "No results returned." Name what happened and what to do next.
+    const allFailed = (data.providers_failed || []).length > 0 &&
+                      (data.providers_used || []).length === 0;
+    html += `<div class="empty-state">
+      <div class="empty-icon">${allFailed ? "🔌" : "🔍"}</div>
+      <div class="empty-title">${allFailed
+        ? "No providers responded"
+        : "No results matched those constraints"}</div>
+      <div class="empty-body">${allFailed
+        ? `Every provider failed: <code>${esc((data.providers_failed || []).join(", "))}</code>.
+           This is usually a network drop or an expired API key — try again, and
+           check <code>/health</code> if it persists.`
+        : `The providers answered but nothing survived filtering. Constraints that
+           are too tight will do this — a result more than 25% over budget, or
+           more than 0.5★ under the minimum, is dropped before scoring.
+           Try relaxing the budget or rating.`}</div>
+    </div>`;
     out.innerHTML = html;
     return;
   }
 
-  // Sponsored penalty banner
-  const sponsoredCount = results.filter(r => r.sponsored).length;
-  if (sponsoredCount > 0) {
-    html += `<div class="penalty-banner">
-      <span class="penalty-banner-icon">⚠</span>
-      <span>${sponsoredCount} sponsored result${sponsoredCount > 1 ? "s were" : " was"} detected and penalized — pushed down in the rankings so organic results rise to the top.</span>
-    </div>`;
-  }
+  // Sponsored demotion. Replaces a generic "N sponsored results were penalised"
+  // line with what the penalty actually did to the ranking — the difference
+  // between claiming the thesis and showing it.
+  html += demotionCallout(results);
 
   const best = results[0];
   const axisHtml = axisChips(best);
@@ -558,6 +738,7 @@ function render(data) {
       ? `<div class="consensus-bar"><div class="consensus-dot"></div>${esc(String(best.consensus_count))} providers agreed on this answer</div>`
       : ""}
     <div class="axis-row">${axisHtml}</div>
+    ${scoreBreakdown(best)}
     ${scoreBar(best.score, "#dc2626")}
     <div class="row">
       <span class="chip">score ${esc(String(best.score))}</span>
@@ -665,6 +846,66 @@ function axisTitle(label, key, dead) {
 // Iterates AXIS_KEYS rather than the payload's own key order, so the chips line
 // up in the same P1/P2/P3 position on every card — that alignment is the whole
 // point of showing them side by side.
+// The arithmetic behind a result's score. Values come from the server's
+// score_breakdown rather than being recomputed here, so what is shown is what
+// actually ranked the result — including the sponsored penalty, which is the
+// project's thesis and was previously invisible on the winning card.
+function scoreBreakdown(r) {
+  const b = r.score_breakdown;
+  if (!b) return "";
+  const row = (term, calc, val, cls = "") =>
+    `<div class="breakdown-row ${cls}">
+       <span class="breakdown-term">${esc(term)}</span>
+       <span class="breakdown-calc">${esc(calc)}</span>
+       <span class="breakdown-val">${esc(val)}</span>
+     </div>`;
+
+  let html = `<div class="breakdown">`;
+  html += row("similarity", `0.50 × ${b.similarity.toFixed(2)}`, b.similarity_weighted.toFixed(3));
+  html += row("axes (P1/P2/P3)", `0.35 × ${b.axis.toFixed(2)}`, b.axis_weighted.toFixed(3));
+  html += row("provider consensus", `0.15 × ${b.consensus.toFixed(2)}`, b.consensus_weighted.toFixed(3));
+  if (b.sponsored_penalty > 0) {
+    html += row("sponsored penalty", "flat", `−${b.sponsored_penalty.toFixed(2)}`, "penalty");
+  }
+  html += row("score", "", Number(r.score).toFixed(3), "breakdown-total");
+  return html + `</div>`;
+}
+
+// The sponsored penalty, shown as what it did rather than as a label. Without
+// this the mechanism is invisible unless someone expands the demoted card and
+// reads the rationale sentence.
+function demotionCallout(results) {
+  const sponsored = results.filter(r => r.sponsored && r.score_breakdown);
+  if (!sponsored.length) return "";
+
+  // Where each result would have landed with the penalty added back. Ranking is
+  // by final score, so removing the penalty re-sorts the whole list.
+  const unpenalised = results
+    .map(r => ({ r, s: r.score + ((r.score_breakdown || {}).sponsored_penalty || 0) }))
+    .sort((a, b) => b.s - a.s);
+
+  const lines = sponsored.map(sp => {
+    const actual = results.indexOf(sp) + 1;
+    const would = unpenalised.findIndex(x => x.r === sp) + 1;
+    if (would >= actual) {
+      // Penalised but already outranked on merit — say so rather than claim a
+      // demotion that did not happen.
+      return `<div>${esc(sp.title)} — penalised, and did not place higher regardless.</div>`;
+    }
+    return `<div><strong>${esc(sp.title)}</strong> would have ranked
+      <span class="demotion-move">#${would}</span> — penalised to
+      <span class="demotion-move">#${actual}</span>.</div>`;
+  }).join("");
+
+  return `<div class="demotion">
+    <div class="demotion-head"><span>⚠</span><span>Sponsored content demoted</span></div>
+    <div class="demotion-body">${lines}
+      <div style="margin-top:6px;opacity:0.85">A flat −0.20 is subtracted from any
+      result a provider flagged as sponsored, regardless of how well it matches.</div>
+    </div>
+  </div>`;
+}
+
 function axisChips(r) {
   const scores = r.axis_scores || {};
   return AXIS_KEYS.filter(k => k in scores).map(k => {
