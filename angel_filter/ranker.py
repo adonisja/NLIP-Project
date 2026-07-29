@@ -172,6 +172,7 @@ class Ranker:
             )
 
         scored.sort(key=lambda r: r.score, reverse=True)
+        scored = _collapse_duplicates(scored)
         return scored[:top_k]
 
     # -- private ---------------------------------------------------------------
@@ -598,6 +599,38 @@ def _build_fuzzy_consensus(
     for i, r in enumerate(results):
         counts[i] = len(cluster_providers[find(i)])
     return counts
+
+
+def _collapse_duplicates(scored: list[RankedResult]) -> list[RankedResult]:
+    """Keep one entry per real-world venue, best-scoring first.
+
+    Consensus clustering deliberately refuses to group results from the same
+    provider, so one provider cannot manufacture its own agreement. That is the
+    right rule for *counting* providers and the wrong one for deduplicating
+    output: nothing collapsed the duplicates, so a venue every provider named
+    took a slot per mention. Observed live — "Shake Shack" held three of five.
+
+    The consensus bonus makes it worse rather than better: agreeing providers
+    all score identically, so the copies land adjacent at the top and crowd out
+    the rest of the ranking.
+
+    Runs after scoring so the surviving copy keeps the consensus count it
+    earned, and after the sort so the copy we keep is the best-scoring one.
+    Matching is on the normalised title, which is the same key the keyword
+    consensus path already trusts for identity.
+    """
+    seen: set[str] = set()
+    unique: list[RankedResult] = []
+    for r in scored:
+        key = _normalise(r.result.title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    dropped = len(scored) - len(unique)
+    if dropped:
+        logger.info("Collapsed %d duplicate result(s) before top-k", dropped)
+    return unique
 
 
 def _build_token_consensus(results: list[ProviderResult]) -> dict[int, int]:

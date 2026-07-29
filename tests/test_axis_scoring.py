@@ -197,22 +197,25 @@ async def test_keyword_scoring_loop_passes_the_mask():
     ranker._ollama_available = False
     ranker._openai_available = False
 
-    # Both titles are the same word, so keyword similarity is identical and the
-    # axis score is the only thing that can separate them. (An earlier version
-    # of this test used different titles; similarity then dominated and the
-    # assertion passed with or without the mask.)
+    # Both titles overlap the query on exactly one token, so keyword similarity
+    # is identical and the axis score is the only thing that can separate them.
+    # (An earlier version used titles that differed in similarity; that
+    # dominated and the assertion passed with or without the mask.)
+    #
+    # They must still be *distinct* titles: identical ones are now collapsed as
+    # duplicates before top-k, which would leave only one result to compare.
     ranked = await ranker.rank(
         "lunch",
         [
-            ProviderResult(title="lunch", snippet="", provider="a", price=9.0, rating=4.8),
-            ProviderResult(title="lunch", snippet="", provider="b"),
+            ProviderResult(title="lunch spot", snippet="", provider="a", price=9.0, rating=4.8),
+            ProviderResult(title="lunch place", snippet="", provider="b"),
         ],
         top_k=5,
         intent=QueryIntent.PRICE,
         constraints=QueryConstraints(budget=15.0, min_rating=4.0),
     )
 
-    # Same title, so identify them by which one carried price data.
+    # Identify them by which one carried price data.
     strong = next(r for r in ranked if r.result.price is not None)
     bare = next(r for r in ranked if r.result.price is None)
 

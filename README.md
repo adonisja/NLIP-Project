@@ -55,6 +55,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Ranker — missing-data axis renormalization | **Working** |
 | Ranker — hard constraint filtering | **Working** |
 | Ranker — fuzzy consensus clustering | **Working** |
+| Ranker — duplicate collapsing (one slot per venue) | **Working** |
 | Ranker — sponsored content penalty | **Working** |
 | Query result cache (3-hour TTL, 10 query history) | **Working** — shared by both the NLIP and REST paths |
 | `GET /health` | **Working** |
@@ -67,7 +68,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **212 passing** |
+| Tests | **217 passing** |
 
 ---
 
@@ -301,6 +302,15 @@ winner's axis chips, and a result missing any axis is drawn hollow in the 3D
 plot — its position on that axis is an assumption, not a measurement. Without
 this the charts plotted the `0.5` placeholder as though it were measured, which
 is precisely the equivalence this section exists to reject.
+
+**One slot per venue.** Consensus clustering deliberately refuses to group
+results from the same provider, so nobody can manufacture their own agreement —
+correct for *counting* providers, wrong for deduplicating output. Nothing
+collapsed the copies, so a venue every provider named took one slot per mention
+("Shake Shack" once held three of five), and the consensus bonus made it worse
+by scoring the copies identically high. Duplicates are now collapsed after
+scoring and before `top_k`, so the surviving entry keeps the consensus count it
+earned and the best-scoring copy is the one kept.
 
 ### 3. Fuzzy consensus bonus (weight: 15%, capped at 2 providers)
 Results mentioned by multiple providers are boosted. Matching uses embedding
@@ -653,7 +663,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 212 tests should pass.
+All 217 tests should pass.
 
 ---
 
@@ -663,7 +673,7 @@ All 212 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-212 tests covering:
+217 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
