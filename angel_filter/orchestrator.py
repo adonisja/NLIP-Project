@@ -51,19 +51,30 @@ class Orchestrator:
         user_lat: float | None = None,
         user_lng: float | None = None,
         intent: QueryIntent | None = None,
+        override_constraints: QueryConstraints | None = None,
+        context_prefix: str = "",
     ) -> OrchestratorResponse:
         """Run the full pipeline: extract constraints → detect intent → fan out → rank.
 
         `intent` overrides keyword detection when the caller states a priority
         explicitly (the UI's axis picker). Left as None, the intent is inferred
         from the query text exactly as before.
+
+        `override_constraints` replaces the ones parsed from the text. A
+        multi-turn refinement ("cheaper than that") computes its bounds from the
+        previous turn rather than from this turn's words, which carry the
+        adjustment but no numbers to parse.
+
+        `context_prefix` is prior conversation prepended to provider prompts,
+        used only for follow-ups the refinement parser did not recognise.
         """
 
         # Combine query + preference so signals in either field are captured
         full_text   = f"{user_query} {user_preference or ''}".strip()
         if intent is None:
             intent = detect_intent(full_text)
-        constraints = extract_constraints(full_text)
+        constraints = override_constraints or extract_constraints(full_text)
+        constraints.context_prefix = context_prefix
         # Location comes from the request, not the query text — attach it so
         # location-aware providers (Google Places) can measure distance.
         constraints.user_lat = user_lat

@@ -34,7 +34,16 @@ from angel_filter.auth import (
     require_session,
 )
 from angel_filter.cache import CACHE
+from angel_filter.conversation import (
+    CONVERSATIONS,
+    Turn,
+    apply_refinement,
+    build_context_prefix,
+    effective_query,
+    looks_like_a_refinement,
+)
 from angel_filter.limits import daily_budget_status, enforce_query_limits
+from angel_filter.constraints import QueryConstraints
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.ranker import QueryIntent
 from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
@@ -155,6 +164,21 @@ def _drop_route(app, path: str) -> int:
     return len(matching)
 
 
+def _constraints_from_payload(payload: dict) -> QueryConstraints:
+    """Rebuild the constraints a turn ran under, from its serialised response.
+
+    A cache hit has no OrchestratorResponse to read, so the stored payload is
+    the only record of what bounds produced that ranking — and the next
+    refinement adjusts exactly those.
+    """
+    c = payload.get("constraints") or {}
+    return QueryConstraints(
+        budget=c.get("budget"),
+        max_distance=c.get("max_distance"),
+        min_rating=c.get("min_rating"),
+    )
+
+
 def _health_response(mode: str, nlip_available: bool) -> dict:
     return {
         "ok": True,
@@ -218,30 +242,87 @@ if _NLIP_AVAILABLE:
                     "No text query found in the NLIP message."
                 )
 
+            # --- Multi-turn -------------------------------------------------
+            # The conversation token is NLIP's own; correlated_execute echoes it
+            # back to the client, so a follow-up arrives carrying the same one.
+            # Memory cannot live on `self` — nlip_server builds a new session
+            # object per request — so it is keyed by that token in CONVERSATIONS.
+            token = msg.extract_conversation_token()
+            conversation = CONVERSATIONS.get(token)
+            previous = conversation.latest if conversation else None
+
+            search_query = user_query
+            refinement: QueryConstraints | None = None
+            notes: list[str] = []
+            context_prefix = ""
+
+            if previous is not None:
+                if looks_like_a_refinement(user_query):
+                    # "cheaper than that" carries the adjustment but not the
+                    # subject; the previous turn supplies what we are searching
+                    # for, and the deltas supply the new bounds.
+                    refinement, notes = apply_refinement(user_query, previous)
+                    search_query = effective_query(user_query, previous)
+                    logger.info(
+                        "Refinement %r on %r -> %s",
+                        user_query, previous.query, "; ".join(notes) or "no change",
+                    )
+                else:
+                    # Not a pattern we recognise. Hand the models the recent
+                    # history so a vaguer follow-up still resolves — the
+                    # fallback path, paid for in tokens only when needed.
+                    context_prefix = build_context_prefix(conversation)
+
             # Cache on the same (query, composed-preference) key the REST path
             # uses, so the two transports share entries instead of each paying
             # for a fan-out the other already did. Until this was added the NLIP
             # path — the active one — never touched the cache at all: /history
             # was always empty and repeating a query re-queried every provider.
+            #
+            # A refinement folds its adjusted bounds into the key: the same
+            # subject under a tighter budget is a different search and must not
+            # be served the previous turn's ranking.
             cache_pref = _cache_pref(
                 preference, user_lat, user_lng,
                 priority.value if priority else None,
             )
-            payload = CACHE.get(user_query, cache_pref)
+            if refinement is not None:
+                cache_pref = f"{cache_pref}|r={refinement.budget},{refinement.max_distance},{refinement.min_rating}"
+
+            payload = CACHE.get(search_query, cache_pref)
             if payload is None:
                 response = await ORCHESTRATOR.handle_query(
-                    user_query=user_query,
+                    user_query=search_query,
                     user_preference=preference,
                     user_lat=user_lat,
                     user_lng=user_lng,
                     intent=priority,
+                    override_constraints=refinement,
+                    context_prefix=context_prefix,
                 )
                 payload = _serialize_response(response)
-                CACHE.set(user_query, cache_pref, {**payload, "cached": True})
+                CACHE.set(search_query, cache_pref, {**payload, "cached": True})
                 summary = _format_reply(response)
             else:
-                logger.info("Cache hit for NLIP query: %r", user_query)
+                logger.info("Cache hit for NLIP query: %r", search_query)
                 summary = _format_reply_from_payload(payload)
+
+            # Say what changed, so a refined result set does not just silently
+            # differ from the previous one.
+            if notes:
+                summary = f"Refined: {', '.join(notes)}.\n{summary}"
+
+            # Remember this turn so the *next* follow-up has an anchor. The top
+            # result's actual values are what "cheaper than that" refers to.
+            top = (payload.get("results") or [None])[0]
+            CONVERSATIONS.record(token, Turn(
+                query=search_query,
+                constraints=refinement or _constraints_from_payload(payload),
+                top_title=top.get("title") if top else None,
+                top_price=(top.get("price") if top else None),
+                top_distance=(top.get("distance") if top else None),
+                top_rating=(top.get("rating") if top else None),
+            ))
 
             # Multipart reply: a human-readable text summary AND a structured
             # JSON submessage carrying the full ranking (scores, axis breakdown,
@@ -669,6 +750,12 @@ def _serialize_response(response) -> dict:
                 "rationale": r.rationale,
                 "sponsored": r.result.sponsored,
                 "consensus_count": r.consensus_count,
+                # The raw values behind the axis scores. A follow-up like
+                # "cheaper than that" has to anchor on what the top result
+                # actually cost, not on its normalised 0-1 P1 score.
+                "price": r.result.price,
+                "distance": r.result.distance,
+                "rating": r.result.rating,
                 "axis_scores": r.axis_scores,
                 # Which axes the provider actually disclosed. axis_scores holds
                 # a 0.5 placeholder for the rest, so a consumer that ignores

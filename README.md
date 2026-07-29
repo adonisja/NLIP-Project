@@ -33,6 +33,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 |---|---|
 | NLIP server (`NLIP_Application` / `NLIP_Session`) | **Working** — the active path; the UI posts to `/nlip/` |
 | NLIP — structured replies (text + JSON submessages) | **Working** — ranking returned as machine-readable JSON, not just prose |
+| NLIP — multi-turn refinement ("cheaper than that") | **Working** — keyed by the protocol's conversation token |
 | FastAPI fallback server | **Working** — used only if the NLIP libraries fail to import |
 | GitHub OAuth login + allowlist | **Working** — needs your own OAuth App (see [Authentication](#authentication)) |
 | Per-user rate limit + daily query cap | **Working** |
@@ -68,7 +69,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **217 passing** |
+| Tests | **253 passing** |
 
 ---
 
@@ -154,6 +155,49 @@ All changes go through pull requests — no direct commits to `main`, including 
   POST /query is the same pipeline over plain REST — the fallback FastAPI
   app in server.py, used only if the NLIP libraries fail to import.
 ```
+
+---
+
+## Multi-turn conversations
+
+This is where NLIP's session model earns its place rather than being ceremony
+around a REST call.
+
+The protocol already carries a **conversation token** — `correlated_execute`
+mints one, echoes the client's back, and the SDK moves it as a
+`format: "token"` submessage — but nothing was stored against it, so every turn
+started cold and *"cheaper than that"* had no *that* to refer to.
+
+```
+turn 1   "lunch spots under $20"     → budget $20, top result $16
+turn 2   "cheaper than that"         → budget $8, results $3–$6
+```
+
+`nlip_server` constructs a **new session object per request**, so memory cannot
+live on the session instance. It lives in `conversation.py`, keyed by the token
+and pruned by age (30 min).
+
+**Follow-ups resolve two ways, in order:**
+
+1. **Deterministic deltas.** "cheaper", "closer", "better rated" adjust the
+   previous turn's constraints. No model call, inspectable, testable offline.
+2. **Model fallback.** Anything the parser does not recognise ("what about
+   vegetarian options") is sent to the providers with recent turns prepended,
+   so vaguer phrasings still work. Costs prompt tokens, hence the fallback.
+
+**A refinement anchors on what the previous turn actually returned**, not on the
+constraint it ran under. Shown an $18 result under a $50 budget, "cheaper" means
+cheaper than **$18** — anchoring on the $50 nobody reached would barely move the
+results.
+
+Two guards worth knowing: a refinement must be **short** (a full sentence
+containing "cheaper" is a *new search*, not an adjustment), and the reply states
+what changed (`Refined: budget tightened to $8.00`) so a shifted result set is
+never silently different.
+
+Conversations are isolated by token, and a client that sends no token gets an
+ordinary one-shot search — which is what keeps a text-only NLIP agent working
+unchanged.
 
 ---
 
@@ -663,7 +707,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 217 tests should pass.
+All 253 tests should pass.
 
 ---
 
@@ -673,7 +717,7 @@ All 217 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-217 tests covering:
+253 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -737,6 +781,7 @@ deterministically and offline.
 | `best rated lunch spots near me` | Rating + distance intent together |
 | `Find me the top 3 lunch spots under $15, within 1 mile, rated at least 4 stars` | All three axes, hard filter, constraint injection |
 | Same query, switching the priority picker | User override beats inferred intent — the winner changes per axis |
+| `lunch spots under $20` then `cheaper than that` | Multi-turn — the follow-up tightens the budget against the last winner |
 | Run any query twice | Cache hit — instant response, "from cache" badge |
 
 ---
@@ -752,6 +797,7 @@ angel_filter/
   prompt.py             # shared prompt builder for AI providers
   cache.py              # in-memory query cache (3-hour TTL)
   geocode.py            # post-hoc distance: resolve venue coords, haversine
+  conversation.py       # multi-turn memory keyed by NLIP conversation token
   auth.py               # GitHub OAuth flow + username allowlist
   limits.py             # per-user rate limit + daily query cap
   providers/
@@ -769,6 +815,7 @@ static/
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
   test_geocode.py            # 53 tests — enrichment, locality, venue filter, cost guards
+  test_conversation.py       # 36 tests — multi-turn refinement, token isolation
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying
