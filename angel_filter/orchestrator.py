@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 
 from angel_filter.constraints import QueryConstraints, extract_constraints
+from angel_filter.geocode import enrich_distances
 from angel_filter.providers.base import BaseProvider, ProviderError, ProviderResult
 from angel_filter.ranker import QueryIntent, RankedResult, Ranker, detect_intent
 
@@ -95,6 +96,20 @@ class Orchestrator:
                 intent=intent,
                 constraints=constraints,
             )
+
+        # Most providers cannot report distance — the AI ones are forbidden from
+        # guessing it and search results have no coordinates — so before this the
+        # P2 axis was populated only by Google Places. Resolve real coordinates
+        # for results that named a venue, then measure. Best-effort: anything
+        # unresolved keeps distance=None and stays honestly unscored on P2.
+        if constraints.user_lat is not None and constraints.user_lng is not None:
+            try:
+                await enrich_distances(
+                    all_results, constraints.user_lat, constraints.user_lng
+                )
+            except Exception:
+                # Enrichment is an enhancement, never a reason to fail a query.
+                logger.exception("Distance enrichment failed; continuing unenriched")
 
         ranked = await self.ranker.rank(
             user_preference or user_query,
