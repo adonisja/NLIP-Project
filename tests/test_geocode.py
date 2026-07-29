@@ -310,3 +310,137 @@ async def test_enrichment_feeds_the_p2_axis(fake_httpx):
     ranked = _assemble_score(r, 0.5, _compute_gap_scores(r, c), 1, QueryIntent.DISTANCE, "why")
 
     assert ranked.axis_scored["P2_distance"] is True
+
+
+# --- Locality for prompts ------------------------------------------------------
+# The AI providers previously received no location at all, so they returned
+# invented placeholder names ("The Green Bowl", "Taco Haven") that geocoded to
+# nothing. Verified live: the same prompt with "Manhattan, NY" attached returns
+# real venues (Joe's Pizza, Los Tacos No. 1) instead.
+
+@pytest.mark.parametrize("address,expected", [
+    ("1464 Atlantic Ave, Brooklyn, NY 11216, USA", "Brooklyn, NY"),
+    ("Manhattan, NY 10036, USA", "Manhattan, NY"),
+    ("350 5th Ave, New York, NY 10118, USA", "New York, NY"),
+])
+def test_locality_trims_street_and_zip(address, expected):
+    """A house number and ZIP add nothing to "suggest lunch nearby".
+
+    Worse, they invite the model to treat the address as a precise target
+    rather than an area to search.
+    """
+    from angel_filter.geocode import _locality_from_address
+    assert _locality_from_address(address) == expected
+
+
+@pytest.mark.parametrize("address", ["", "   ", "USA"])
+def test_locality_degrades_to_none(address):
+    from angel_filter.geocode import _locality_from_address
+    assert _locality_from_address(address) is None
+
+
+@pytest.mark.asyncio
+async def test_describe_location_noop_without_prerequisites(monkeypatch):
+    """No key or no coordinates means no locality — and no network call."""
+    from angel_filter.geocode import describe_location
+    monkeypatch.delenv("GOOGLE_PLACES_API_KEY", raising=False)
+    assert await describe_location(40.758, -73.9855, api_key=None) is None
+    assert await describe_location(None, None, api_key="k") is None
+
+
+def test_prompt_includes_locality_when_known():
+    """The whole point: the model is told where the user is."""
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.prompt import build_prompt
+
+    p = build_prompt("lunch", 5, QueryConstraints(user_locality="Manhattan, NY"))
+    assert "Manhattan, NY" in p
+
+
+def test_prompt_omits_locality_when_unknown():
+    """Without coordinates the prompt must look exactly as it did before."""
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.prompt import build_prompt
+
+    p = build_prompt("lunch", 5, QueryConstraints())
+    assert "User is in or near" not in p
+
+
+def test_prompt_still_forbids_inventing_distance():
+    """Knowing the area must not become licence to guess distances.
+
+    The model proposes local venues; geocode.py measures them. If this rule
+    ever drops, fabricated distance_miles values reach the P2 axis.
+    """
+    from angel_filter.constraints import QueryConstraints
+    from angel_filter.prompt import build_prompt
+
+    p = build_prompt("lunch", 5, QueryConstraints(user_locality="Manhattan, NY"))
+    assert "Do NOT include distance_miles" in p
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_resolves_locality_into_constraints(monkeypatch):
+    """The wiring, not just the pieces.
+
+    The prompt tests pass even if the orchestrator never calls
+    describe_location — the field simply stays None and the prompt omits it
+    silently. Only driving handle_query catches that.
+    """
+    import angel_filter.orchestrator as orch
+    from angel_filter.providers.base import BaseProvider
+
+    async def fake_describe(lat, lng, api_key=None):
+        return "Manhattan, NY"
+
+    monkeypatch.setattr(orch, "describe_location", fake_describe)
+
+    seen = {}
+
+    class _P(BaseProvider):
+        name = "mock"
+
+        async def query(self, q, max_results=10, constraints=None):
+            seen["locality"] = constraints.user_locality
+            return []
+
+    class _R:
+        async def rank(self, *a, **k):
+            return []
+
+    await orch.Orchestrator(providers=[_P()], ranker=_R()).handle_query(
+        "lunch", user_lat=40.758, user_lng=-73.9855
+    )
+
+    assert seen["locality"] == "Manhattan, NY", (
+        "provider prompts never received the user's locality"
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_skips_locality_without_coordinates(monkeypatch):
+    """No coordinates means no lookup at all — not a wasted API call."""
+    import angel_filter.orchestrator as orch
+    from angel_filter.providers.base import BaseProvider
+
+    calls = {"n": 0}
+
+    async def fake_describe(lat, lng, api_key=None):
+        calls["n"] += 1
+        return "Somewhere"
+
+    monkeypatch.setattr(orch, "describe_location", fake_describe)
+
+    class _P(BaseProvider):
+        name = "mock"
+
+        async def query(self, q, max_results=10, constraints=None):
+            return []
+
+    class _R:
+        async def rank(self, *a, **k):
+            return []
+
+    await orch.Orchestrator(providers=[_P()], ranker=_R()).handle_query("lunch")
+
+    assert calls["n"] == 0

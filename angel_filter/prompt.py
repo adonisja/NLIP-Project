@@ -29,6 +29,13 @@ def build_prompt(
     c = constraints or QueryConstraints()
 
     constraint_lines = []
+    # The user's neighbourhood, when we know it. Without this the model suggests
+    # venues from anywhere and most of them are not near the user at all — it
+    # was being asked for "lunch nearby" with no idea where "near" is. Naming
+    # the area does not license inventing distances: the model proposes local
+    # places, and geocode.py still measures them.
+    if c.user_locality:
+        constraint_lines.append(f"- User is in or near: {c.user_locality}")
     if c.budget is not None:
         constraint_lines.append(f"- Budget: under ${c.budget:.2f} per person")
     if c.min_rating is not None:
@@ -75,6 +82,8 @@ Rules:
 - rating must be a number 0-5. Use null if unknown.
 - area is a neighborhood, district, or city area — not a full address.
 - notes must explain how this result satisfies the constraints.
-- Do NOT include distance_miles — you do not know the user's location.
+- Do NOT include distance_miles. Even when the user's area is given above, you
+  cannot know their exact position — we measure the real distance ourselves from
+  the venue's coordinates. Suggest places in that area; leave the measuring to us.
 - Do not include markdown, code fences, or any text outside the JSON.{format_reminder}
 """.strip()

@@ -108,6 +108,98 @@ def _names_agree(asked: str, matched: str) -> bool:
     return bool(a & m)
 
 
+_NEARBY_URL = "https://places.googleapis.com/v1/places:searchNearby"
+
+# Cache resolved localities: a user's coordinates barely move between queries,
+# and the answer ("Manhattan, NY") is stable. Keyed on coordinates rounded to
+# ~110m, the same precision the query cache uses.
+_locality_cache: dict[tuple[float, float], str | None] = {}
+
+
+def _locality_from_address(address: str) -> str | None:
+    """Trim a street address down to the part a model should reason about.
+
+    "1464 Atlantic Ave, Brooklyn, NY 11216, USA" -> "Brooklyn, NY". The house
+    number and ZIP add nothing to "suggest lunch nearby" and invite the model to
+    treat them as a precise target.
+    """
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    if not parts:
+        return None
+    # Drop a leading street line (starts with a house number) and a trailing
+    # country. What remains is locality plus state/ZIP.
+    if parts and parts[0][:1].isdigit():
+        parts = parts[1:]
+    if parts and parts[-1].upper() in {"USA", "US", "UNITED STATES"}:
+        parts = parts[:-1]
+    if not parts:
+        return None
+    # Strip a ZIP off the state component: "NY 11216" -> "NY".
+    tail = parts[-1].split()
+    if len(tail) > 1 and tail[-1].replace("-", "").isdigit():
+        parts[-1] = " ".join(tail[:-1])
+    return ", ".join(parts[:2]) or None
+
+
+async def describe_location(
+    lat: float | None,
+    lng: float | None,
+    api_key: str | None = None,
+) -> str | None:
+    """Human-readable locality for the user's coordinates, or None.
+
+    Uses the Places API rather than the Geocoding API: they are separate
+    products in Google Cloud, and requiring a second one to be enabled would be
+    another setup step for every contributor. Nearest-place lookup at a 200m
+    radius yields the same answer for this purpose.
+
+    Best-effort — any failure returns None and the caller simply omits location
+    from the prompt, which is the pre-existing behaviour.
+    """
+    api_key = api_key or os.getenv("GOOGLE_PLACES_API_KEY")
+    if not api_key or lat is None or lng is None:
+        return None
+
+    key = (round(lat, 3), round(lng, 3))
+    if key in _locality_cache:
+        return _locality_cache[key]
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                _NEARBY_URL,
+                json={
+                    "locationRestriction": {
+                        "circle": {
+                            "center": {"latitude": lat, "longitude": lng},
+                            "radius": 200.0,
+                        }
+                    },
+                    "maxResultCount": 1,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-Api-Key": api_key,
+                    "X-Goog-FieldMask": "places.formattedAddress",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.debug("Reverse lookup failed for (%s, %s): %s", lat, lng, exc)
+        _locality_cache[key] = None
+        return None
+
+    places = data.get("places") or []
+    locality = _locality_from_address(places[0].get("formattedAddress", "")) if places else None
+    _locality_cache[key] = locality
+    if locality:
+        logger.info("User location resolved to %r", locality)
+    return locality
+
+
 async def _lookup_one(client, title: str, lat: float, lng: float, api_key: str):
     """Geocode a single title. Returns (lat, lng) or None.
 

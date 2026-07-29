@@ -34,6 +34,11 @@ class QueryConstraints:
     min_rating: float | None = None    # P3 — minimum acceptable star rating
     user_lat: float | None = None      # request-supplied origin latitude
     user_lng: float | None = None      # request-supplied origin longitude
+    # Human-readable form of the above ("Manhattan, NY"), resolved once per
+    # query and injected into AI provider prompts. Models reason about named
+    # areas, not decimal coordinates — without it they suggest venues from
+    # anywhere. Never parsed from the query text; derived from the coordinates.
+    user_locality: str | None = None
 
 
 # --- Regex patterns -----------------------------------------------------------

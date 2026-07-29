@@ -66,7 +66,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **170 passing** |
+| Tests | **191 passing** |
 
 ---
 
@@ -87,7 +87,9 @@ All changes go through pull requests — no direct commits to `main`, including 
     │       Orchestrator          │   angel_filter/orchestrator.py
     │  1. extract_constraints()   │   angel_filter/constraints.py
     │  2. detect_intent()         │
-    │  3. fan-out in parallel     │
+    │  3. describe_location()     │   angel_filter/geocode.py
+    │     coords → "Manhattan, NY"│   (goes into the AI prompts)
+    │  4. fan-out in parallel     │
     └──┬──────┬──────┬──────┬────┘
        │      │      │      │
    OpenAI  Gemini Ollama WatsonX     angel_filter/providers/*.py
@@ -200,6 +202,15 @@ providers (OpenAI, Gemini, Ollama, WatsonX) return price and rating but never
 distance — they have no location context and would fabricate it — and Brave
 returns no structured fields at all — it is a *web* search API, so its results
 are pages, not places, and carry no coordinates to read.
+
+**The models are told where you are.** The browser's coordinates are reverse-
+resolved to a neighbourhood ("Manhattan, NY") and injected into every AI
+provider's prompt. Without it they were being asked for "lunch nearby" with no
+idea where "near" is, and returned invented placeholders — *The Green Bowl*,
+*Taco Haven*, *Bistro Bites* — that geocoded to nothing. With it, the same
+prompt returns *Joe's Pizza*, *Los Tacos No. 1*, *The Halal Guys*. Naming the
+area is not licence to invent distances: the prompt still forbids
+`distance_miles`, because the model knows the neighbourhood, not your position.
 
 **Distance is measured, never guessed.** Two things populate the P2 axis. The
 **Google Places** provider returns nearby venues with coordinates and computes
@@ -592,7 +603,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 170 tests should pass.
+All 191 tests should pass.
 
 ---
 
@@ -602,7 +613,7 @@ All 170 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-170 tests covering:
+191 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -634,6 +645,8 @@ python3.12 -m pytest tests/ -v
   its `/health/live` and `/health/ready` probes still respond
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
+- The user's locality reaches provider prompts through the orchestrator (the
+  wiring, not just the prompt builder), and is skipped entirely without coords
 - Post-hoc enrichment resolves coordinates for venues other providers named,
   never overwrites a distance a provider already measured, deduplicates repeat
   titles to one lookup, survives a failing lookup, skips article-like titles,
