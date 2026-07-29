@@ -72,48 +72,73 @@ All changes go through pull requests — no direct commits to `main`, including 
 ## Architecture
 
 ```
-    user (browser)
-          │
-          │  POST /query
-          ▼
-    ┌─────────────────────────────┐
-    │     FastAPI server          │   angel_filter/server.py
-    │     + Query cache (3hr TTL) │   angel_filter/cache.py
-    └─────────────┬───────────────┘
-                  │
-                  ▼
-    ┌─────────────────────────────┐
-    │       Orchestrator          │   angel_filter/orchestrator.py
-    │  1. extract_constraints()   │   angel_filter/constraints.py
-    │  2. detect_intent()         │
-    │  3. fan-out in parallel     │
-    └──┬──────┬──────┬──────┬────┘
-       │      │      │      │
-   OpenAI  Gemini Ollama WatsonX     angel_filter/providers/*.py
-       │      │      │      │        (Brave also available)
-       └──────┴──┬───┴──────┘
-                 │  normalized ProviderResult list
-                 ▼
-    ┌─────────────────────────────┐
-    │          Ranker             │   angel_filter/ranker.py
-    │  1. hard constraint filter  │
-    │  2. Ollama embeddings       │
-    │     → semantic similarity   │
-    │  3. P1/P2/P3 axis scoring   │
-    │  4. fuzzy consensus cluster │
-    │  5. sponsored penalty       │
-    └─────────────┬───────────────┘
-                  │  RankedResult list
-                  ▼
-    ┌─────────────────────────────┐
-    │       Demo UI               │   static/index.html
-    │  - ranked result cards      │
-    │  - score bars               │
-    │  - 3D scoring space         │
-    │  - radar chart              │
-    │  - provider breakdown       │
-    │  - query history            │
-    └─────────────────────────────┘
+                       user (browser)
+                             │
+              GitHub OAuth ──┤  no session? → /login → GitHub → allowlist
+              auth.py        │                        (ANGEL_ALLOWED_USERS)
+                             ▼
+    ┌────────────────────────────────────────────────┐
+    │  POST /nlip/          NLIP_Session.execute()   │  server.py
+    │                                                │
+    │  Multipart NLIP_Message in, by label:          │
+    │    (unlabeled text) → query                    │
+    │    "preference"     → similarity target        │
+    │    "user_location"  → lat/lng                  │
+    │    "priority"       → axis override            │
+    │                                                │
+    │  rate limit + daily cap ─── limits.py          │
+    │  query cache (3h TTL) ───── cache.py           │
+    │    on a hit the stored payload is returned     │
+    │    here — everything below is skipped          │
+    └───────────────────┬────────────────────────────┘
+                        │  cache miss
+                        ▼
+    ┌────────────────────────────────────────────────┐
+    │  Orchestrator                                  │  orchestrator.py
+    │   1. extract_constraints()  ($15, 1mi, 4★)     │  constraints.py
+    │   2. detect_intent()  — unless "priority" set  │
+    │   3. asyncio.gather() over every provider      │
+    │      a failing provider is isolated, not fatal │
+    └─┬────────┬────────┬────────┬───────┬─────────┬─┘
+      │        │        │        │       │         │
+   OpenAI   Gemini   Ollama  WatsonX   Brave   Google Places    providers/*.py
+      │        │        │        │       │         │
+      └────────┴───┬────┴────────┘       │         └── the only source of
+                   │                     │             real distance
+      price + rating, never distance     └── no structured fields
+      (prompt.py forbids it — the                       │
+       models have no location context)                 │
+                   │                                    │
+      ┌────────────┴────────────────────────────────────┘
+      │  ProviderResult[]  (normalized at this boundary)
+      ▼
+    ┌────────────────────────────────────────────────┐
+    │  Ranker                                        │  ranker.py
+    │   1. hard constraint filter (>25% over budget, │
+    │      >0.5★ under minimum → dropped)            │
+    │   2. embed: Ollama → OpenAI → keyword overlap  │
+    │   3. fuzzy consensus clusters (cos ≥ 0.75)     │
+    │   4. per-result scoring:                       │
+    │        0.50 × similarity                       │
+    │      + 0.35 × axis (P1/P2/P3, intent-weighted, │
+    │                renormalized over real axes)    │
+    │      + 0.15 × consensus (capped at 2)          │
+    │      − 0.20 if sponsored                       │
+    └───────────────────┬────────────────────────────┘
+                        │  RankedResult[] → _serialize_response()
+                        ▼  text summary + structured JSON submessage
+    ┌────────────────────────────────────────────────┐
+    │  Demo UI                                       │  static/index.html
+    │   ranked cards · P1/P2/P3 chips · score bars   │
+    │   3D scoring space · radar · provider panel    │
+    │   priority picker · query history              │
+    └────────────────────────────────────────────────┘
+
+  Also on the server:  GET /health · GET /metrics (Prometheus)
+                       GET /history · POST /cache/clear     (session required)
+
+  POST /query is the same pipeline over plain REST — the fallback FastAPI
+  app in server.py, used only if the NLIP libraries fail to import.
 ```
 
 ---
