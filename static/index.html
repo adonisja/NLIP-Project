@@ -36,6 +36,10 @@
   .axis-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
   .axis-chip { font-size: 12px; background: #202840; border-radius: 8px; padding: 4px 10px; }
   .axis-chip span { color: var(--accent); font-weight: 600; }
+  /* An axis the provider never reported: muted and italic so "no data" reads as
+     an absence rather than as another measured value sitting alongside real ones. */
+  .axis-chip-missing { opacity: 0.55; }
+  .axis-chip-missing span { color: var(--muted); font-weight: 500; font-style: italic; }
 
   /* Score bar */
   .score-bar-wrap { margin: 10px 0 6px; }
@@ -390,13 +394,7 @@ function render(data) {
   }
 
   const best = results[0];
-  const axes = best.axis_scores || {};
-  // Show "no data" rather than the 0.5 placeholder for axes the provider never
-  // disclosed — printing the placeholder states an average the ranker never
-  // actually measured.
-  const axisHtml = Object.keys(axes).map(k =>
-    `<div class="axis-chip">${esc(k.replace("_", " "))}: <span>${esc(axisLabel(best, k))}</span></div>`
-  ).join("");
+  const axisHtml = axisChips(best);
 
   html += `<div class="best-card">
     <div class="best-label">Angel Filter's best answer</div>
@@ -430,6 +428,7 @@ function render(data) {
         ${r.sponsored ? `<span class="chip sponsored" style="font-size:11px;margin-left:6px">sponsored</span>` : ""}
         <div class="snippet">${esc(r.snippet || "")}</div>
         ${safeLink(r.url, "snippet")}
+        <div class="axis-row">${axisChips(r)}</div>
         ${scoreBar(r.score, r.sponsored ? "#b45309" : pColor)}
         <div class="row">
           <span class="chip">score ${esc(String(r.score))}</span>
@@ -466,6 +465,8 @@ function scoreBar(score, color) {
 }
 
 // Fix: use index (i === 0) not title equality for winner detection
+const AXIS_KEYS = ["P1_price", "P2_distance", "P3_rating"];
+
 // Was this axis actually measured, or is the 0.5 in axis_scores a placeholder?
 // The server sends axis_scored alongside the scores precisely so the UI can
 // tell the difference — plotting an undisclosed axis at 0.5 would draw silence
@@ -492,16 +493,46 @@ function axisLabel(r, axis) {
   return typeof v === "number" ? v.toFixed(2) : "no data";
 }
 
+// An axis nobody reported. The usual case: only Google Places returns distance,
+// so a run without it leaves every result at the 0.5 placeholder on P2. That is
+// a property of the whole run, not of any one result — so it belongs on the
+// axis label, not on each marker.
+function deadAxes(results) {
+  return AXIS_KEYS.filter(k => results.every(r => !axisWasScored(r, k)));
+}
+
+// Say so on the axis when nothing was measured along it, so the plane of points
+// sitting at 0.5 reads as "not measured" rather than "all average".
+function axisTitle(label, key, dead) {
+  return dead.has(key) ? `${label} — no provider reported this` : label;
+}
+
+// Axis chips for a result card. Shown on every result, not just the winner, so
+// the ranking can be compared axis by axis instead of on the final score alone.
+// Iterates AXIS_KEYS rather than the payload's own key order, so the chips line
+// up in the same P1/P2/P3 position on every card — that alignment is the whole
+// point of showing them side by side.
+function axisChips(r) {
+  const scores = r.axis_scores || {};
+  return AXIS_KEYS.filter(k => k in scores).map(k => {
+    const missing = !axisWasScored(r, k);
+    return `<div class="axis-chip${missing ? " axis-chip-missing" : ""}">` +
+           `${esc(k.replace("_", " "))}: <span>${esc(axisLabel(r, k))}</span></div>`;
+  }).join("");
+}
+
 function render3D(results) {
   const xs = results.map(r => axisValue(r, "P1_price"));
   const ys = results.map(r => axisValue(r, "P2_distance"));
   const zs = results.map(r => axisValue(r, "P3_rating"));
-  // A result missing any axis is plotted hollow — its position on that axis is
-  // an assumption, not a measurement.
-  const partial = results.map(r =>
-    !axisWasScored(r, "P1_price") ||
-    !axisWasScored(r, "P2_distance") ||
-    !axisWasScored(r, "P3_rating"));
+
+  // Hollow marks a result whose data is worse than its peers'. If an axis is
+  // missing for everyone, hollowing every point conveys nothing and throws away
+  // the provider colour coding — so only axes that at least one result reported
+  // count toward "this one is incomplete".
+  const dead = new Set(deadAxes(results));
+  const comparable = AXIS_KEYS.filter(k => !dead.has(k));
+  const partial = results.map(r => comparable.some(k => !axisWasScored(r, k)));
   const colors  = results.map((r, i) => i === 0 ? "#dc2626" : r.sponsored ? "#b45309" : (PROVIDER_COLORS[r.provider] || "#6aa9ff"));
   const sizes   = results.map((r, i) => i === 0 ? 16 : 10);
   const symbols = results.map((r, i) => i === 0 ? "diamond" : r.sponsored ? "x" : "circle");
@@ -575,9 +606,9 @@ function render3D(results) {
     paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)",
     font:{color:"#93a0b8",size:12},
     scene:{
-      xaxis:{title:"P1 Price score",    backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
-      yaxis:{title:"P2 Distance score", backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
-      zaxis:{title:"P3 Rating score",   backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      xaxis:{title:axisTitle("P1 Price score",    "P1_price",    dead),backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      yaxis:{title:axisTitle("P2 Distance score", "P2_distance", dead),backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
+      zaxis:{title:axisTitle("P3 Rating score",   "P3_rating",   dead),backgroundcolor:"rgba(255,255,255,0.03)",gridcolor:"rgba(255,255,255,0.07)",zerolinecolor:"rgba(255,255,255,0.15)",range:[0,1]},
       camera:{eye:{x:1.6,y:1.4,z:1.2}}, aspectmode:"cube",
     },
     legend:{orientation:"h",x:0,y:1.02,yanchor:"bottom",xanchor:"left",bgcolor:"rgba(26,32,50,0.9)",bordercolor:"rgba(255,255,255,0.1)",borderwidth:1},
