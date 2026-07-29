@@ -34,6 +34,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | NLIP server (`NLIP_Application` / `NLIP_Session`) | **Working** — the active path; the UI posts to `/nlip/` |
 | NLIP — structured replies (text + JSON submessages) | **Working** — ranking returned as machine-readable JSON, not just prose |
 | NLIP — multi-turn refinement ("cheaper than that") | **Working** — keyed by the protocol's conversation token |
+| Demo UI — New Search / Continue chooser | **Working** — the client states the turn mode; the server never guesses |
 | FastAPI fallback server | **Working** — used only if the NLIP libraries fail to import |
 | GitHub OAuth login + allowlist | **Working** — needs your own OAuth App (see [Authentication](#authentication)) |
 | Per-user rate limit + daily query cap | **Working** |
@@ -69,7 +70,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **253 passing** |
+| Tests | **264 passing** |
 
 ---
 
@@ -89,6 +90,12 @@ All changes go through pull requests — no direct commits to `main`, including 
     │    "preference"     → similarity target        │
     │    "user_location"  → lat/lng                  │
     │    "priority"       → axis override            │
+    │    "turn_mode"      → continue / new           │
+    │    (token submsg)   → conversation identity    │
+    │                                                │
+    │  multi-turn memory ──────── conversation.py    │
+    │    "continue" + a live token → refine the      │
+    │    previous turn instead of starting over      │
     │                                                │
     │  rate limit + daily cap ─── limits.py          │
     │  query cache (3h TTL) ───── cache.py           │
@@ -195,9 +202,27 @@ containing "cheaper" is a *new search*, not an adjustment), and the reply states
 what changed (`Refined: budget tightened to $8.00`) so a shifted result set is
 never silently different.
 
-Conversations are isolated by token, and a client that sends no token gets an
-ordinary one-shot search — which is what keeps a text-only NLIP agent working
-unchanged.
+**The client says which it is.** After a query has run, the UI shows two
+buttons — **New Search** and **Continue from Previous** — and submit stays
+disabled until one is chosen. That removes the guess entirely: the server reads
+a `turn_mode` submessage (`"continue"` / `"new"`) rather than inferring intent
+from wording, which is wrong in both directions — a genuinely new search
+containing "cheaper" would read as a refinement, and a follow-up phrased
+unusually would read as new. The chooser is hidden on a fresh session, since
+there is nothing to continue from, and the choice re-opens after every query so
+a user who refines twice and then changes topic is never silently carried along.
+
+The browser owns the conversation token: `correlated_execute` echoes back
+whatever the client sends but never mints one, and a server-side token would
+change every turn anyway since a new session object is built per request. It
+lives in `sessionStorage` — a new tab is a new conversation — and **New Search**
+drops it, so no prior turn can leak in even if the wording looks like a
+refinement.
+
+`turn_mode` is optional. Without it the server falls back to the phrase
+heuristic, so conversations are isolated by token and a client that sends no
+token at all gets an ordinary one-shot search — which is what keeps a text-only
+NLIP agent working unchanged.
 
 ---
 
@@ -707,7 +732,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 253 tests should pass.
+All 264 tests should pass.
 
 ---
 
@@ -717,7 +742,7 @@ All 253 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-253 tests covering:
+264 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -815,7 +840,7 @@ static/
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
   test_geocode.py            # 53 tests — enrichment, locality, venue filter, cost guards
-  test_conversation.py       # 36 tests — multi-turn refinement, token isolation
+  test_conversation.py       # 47 tests — multi-turn refinement, token isolation, turn mode
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying

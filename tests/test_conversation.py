@@ -364,3 +364,79 @@ async def test_refinements_compound_across_turns(spy_session):
     first = spy.calls[1]["override_constraints"].budget
     second = spy.calls[2]["override_constraints"].budget
     assert second < first, f"second refinement did not tighten further ({second} vs {first})"
+
+
+# --- The turn_mode flag --------------------------------------------------------
+# The UI states outright whether a query continues the thread. Inferring it from
+# phrasing is wrong in both directions: a genuinely new search containing
+# "cheaper" reads as a refinement, and a follow-up phrased unusually reads as
+# new. The flag removes the guess; its absence keeps the old heuristic so an
+# agent client that never sends the label is unaffected.
+
+def _msg_mode(text, token=None, mode=None):
+    m = nlip.NLIP_Factory.create_text(text)
+    if token:
+        m.add_conversation_token(token)
+    if mode:
+        m.add_text(mode, label="turn_mode")
+    return m
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("continue", "continue"), ("new", "new"),
+    ("CONTINUE", "continue"), ("  new  ", "new"),
+])
+def test_turn_mode_is_read_from_the_message(value, expected):
+    assert server._extract_turn_mode(_msg_mode("q", mode=value)) == expected
+
+
+@pytest.mark.parametrize("value", ["maybe", "", "resume"])
+def test_unrecognised_turn_mode_degrades_to_none(value):
+    """An unknown value falls back to the heuristic, never raises."""
+    assert server._extract_turn_mode(_msg_mode("q", mode=value)) is None
+
+
+def test_absent_turn_mode_is_none():
+    """Agent clients that know nothing about this label keep working."""
+    assert server._extract_turn_mode(nlip.NLIP_Factory.create_text("q")) is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_new_ignores_prior_turns(spy_session):
+    """The flag's real work.
+
+    "cheaper" after a previous turn would normally refine. Saying "new" must
+    override that — the user told us this is a fresh search, and honouring the
+    wording instead would silently apply bounds they did not ask for.
+    """
+    session, spy = spy_session
+
+    await session.execute(_msg_mode("lunch under $20", token="c1", mode="new"))
+    await session.execute(_msg_mode("cheaper", token="c1", mode="new"))
+
+    assert spy.calls[1]["override_constraints"] is None
+    assert spy.calls[1]["query"] == "cheaper"
+    assert spy.calls[1]["context_prefix"] == ""
+
+
+@pytest.mark.asyncio
+async def test_explicit_continue_refines(spy_session):
+    session, spy = spy_session
+
+    await session.execute(_msg_mode("lunch under $20", token="c1", mode="new"))
+    await session.execute(_msg_mode("cheaper", token="c1", mode="continue"))
+
+    assert spy.calls[1]["override_constraints"] is not None
+    assert spy.calls[1]["query"] == "lunch under $20"
+
+
+@pytest.mark.asyncio
+async def test_continue_without_a_recognised_delta_sends_context(spy_session):
+    """Stated follow-up, unrecognised wording — the model fallback path."""
+    session, spy = spy_session
+
+    await session.execute(_msg_mode("lunch under $20", token="c1", mode="new"))
+    await session.execute(_msg_mode("any vegetarian ones", token="c1", mode="continue"))
+
+    assert spy.calls[1]["override_constraints"] is None
+    assert "lunch under $20" in spy.calls[1]["context_prefix"]
