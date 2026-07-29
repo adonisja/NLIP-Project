@@ -105,6 +105,12 @@
   .demo-btn { background: #1a2032; border: 1px solid var(--border); color: var(--muted); font: inherit; font-size: 12px; border-radius: 999px; padding: 5px 14px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
   .demo-btn:hover { border-color: var(--accent); color: var(--accent); background: #1e2d50; }
 
+  /* Axis priority picker — overrides keyword intent detection when not Auto */
+  .priority-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .priority-btn { background: #1a2032; border: 1px solid var(--border); color: var(--muted); font: inherit; font-size: 13px; border-radius: 999px; padding: 7px 16px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+  .priority-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .priority-btn.active { border-color: var(--accent); color: var(--accent); background: #1e2d50; font-weight: 600; }
+
   /* Sponsored penalty banner */
   .penalty-banner { background: #3a2a1a; border: 1px solid #b4570844; border-radius: 10px; padding: 10px 16px; margin-bottom: 14px; font-size: 13px; color: var(--warn); display: flex; align-items: center; gap: 8px; }
   .penalty-banner-icon { font-size: 16px; flex-shrink: 0; }
@@ -130,7 +136,14 @@
       <button type="button" class="demo-btn" onclick="setDemo('Top rated sushi restaurants within 2 miles')">🍣 Sushi nearby</button>
     </div>
     <span class="label">What matters most to you? (optional)</span>
-    <input id="p" placeholder='e.g. "low price" or "closest to me" or "highest rated"' />
+    <input id="p" placeholder='e.g. "quiet place to work"' />
+    <span class="label">Priority</span>
+    <div class="priority-picker" id="priority-picker">
+      <button type="button" class="priority-btn active" data-priority="auto">✨ Auto-detect</button>
+      <button type="button" class="priority-btn" data-priority="price">💰 Price</button>
+      <button type="button" class="priority-btn" data-priority="distance">📍 Distance</button>
+      <button type="button" class="priority-btn" data-priority="rating">⭐ Rating</button>
+    </div>
     <div style="display:flex;gap:10px">
       <button id="go" class="primary" type="submit" style="flex:1">Ask Angel Filter</button>
       <button type="button" class="toggle-btn" onclick="toggleHistory()" style="white-space:nowrap">Recent queries</button>
@@ -197,6 +210,17 @@ logoutBtn.addEventListener("click", async () => {
 // permission, or null on denial / no support / timeout. Never rejects: distance
 // is a bonus signal, so a missing location must never block a search — the
 // backend's Google Places provider simply skips itself when no coords arrive.
+// Axis priority picker. "auto" keeps the server's keyword intent detection;
+// any other value overrides it for that query.
+let selectedPriority = "auto";
+document.getElementById("priority-picker").addEventListener("click", (e) => {
+  const btn = e.target.closest(".priority-btn");
+  if (!btn) return;
+  document.querySelectorAll(".priority-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  selectedPriority = btn.dataset.priority;
+});
+
 function getUserLocation() {
   return new Promise((resolve) => {
     if (!("geolocation" in navigator)) { resolve(null); return; }
@@ -206,6 +230,53 @@ function getUserLocation() {
       { timeout: 8000, maximumAge: 300000 },  // 8s cap; reuse a fix up to 5 min old
     );
   });
+}
+
+// Build the NLIP_Message the server expects. Shape mirrors nlip_sdk:
+//   - query      -> top-level text content (unlabeled)
+//   - preference -> a text submessage labeled "preference"
+//   - location   -> a GPS submessage labeled "user_location", content is JSON
+//   - priority   -> a text submessage labeled "priority" naming one axis
+// Optional parts are only attached when present, so a bare query is a valid
+// simple text message.
+function buildNlipMessage(query, preference, loc, priority) {
+  const submessages = [];
+  if (preference) {
+    submessages.push({ format: "text", subformat: "english",
+                       content: preference, label: "preference" });
+  }
+  // "auto" is the absence of a choice — send nothing and let the server's
+  // keyword detection decide, which is the pre-picker behaviour.
+  if (priority && priority !== "auto") {
+    submessages.push({ format: "text", subformat: "english",
+                       content: priority, label: "priority" });
+  }
+  if (loc) {
+    submessages.push({ format: "location", subformat: "gps",
+                       content: JSON.stringify({ lat: loc.lat, lng: loc.lng }),
+                       label: "user_location" });
+  }
+  const msg = { format: "text", subformat: "english", content: query };
+  if (submessages.length) msg.submessages = submessages;
+  return msg;
+}
+
+// Pull the ranking out of the NLIP reply. The server returns a text summary
+// plus a structured-JSON submessage (format "structured", subformat "JSON")
+// whose content is the same payload the REST endpoint used to return. We find
+// that submessage and hand its content to the existing render code unchanged.
+function parseNlipReply(reply) {
+  const parts = [reply, ...(reply.submessages || [])];
+  for (const p of parts) {
+    const fmt = (p.format || "").toLowerCase();
+    const sub = (p.subformat || "").toLowerCase();
+    if (fmt === "structured" && sub === "json") {
+      // content may arrive as an object or a JSON string, depending on encoding.
+      return typeof p.content === "string" ? JSON.parse(p.content) : p.content;
+    }
+  }
+  // No structured part (e.g. the "no text query" reply) — nothing to render.
+  return { results: [], providers_used: [], providers_failed: [] };
 }
 
 form.addEventListener("submit", async (e) => {
@@ -224,18 +295,18 @@ form.addEventListener("submit", async (e) => {
     // declines — we then send no coords and distance scoring stays neutral.
     const loc = await getUserLocation();
 
-    const res = await fetch("/query", {
+    // Talk to the server over NLIP — the protocol this project is built on —
+    // not the plain REST route. The query, preference, and GPS location each
+    // travel as a typed NLIP submessage; the ranking comes back inside the
+    // reply's structured-JSON submessage.
+    const res = await fetch("/nlip/", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        query,
-        preference,
-        ...(loc ? { lat: loc.lat, lng: loc.lng } : {}),
-      }),
+      body: JSON.stringify(buildNlipMessage(query, preference, loc, selectedPriority)),
     });
     if (res.status === 401) { location.href = "/login"; return; }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = parseNlipReply(await res.json());
     const scores = (data.results || []).map(r => r.score).filter(s => isFinite(s));
     _maxScore = scores.length ? Math.max(...scores) : 1;
     // Render viz FIRST so it appears above results

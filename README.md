@@ -31,9 +31,11 @@ All changes go through pull requests — no direct commits to `main`, including 
 
 | Component | State |
 |---|---|
-| NLIP server (`NLIPApplication` / `NLIPSession`) | **Working** — libraries install; the server runs the NLIP path by default |
+| NLIP server (`NLIP_Application` / `NLIP_Session`) | **Working** — the active path; the UI posts to `/nlip/` |
 | NLIP — structured replies (text + JSON submessages) | **Working** — ranking returned as machine-readable JSON, not just prose |
 | FastAPI fallback server | **Working** — used only if the NLIP libraries fail to import |
+| GitHub OAuth login + allowlist | **Working** — needs your own OAuth App (see [Authentication](#authentication)) |
+| Per-user rate limit + daily query cap | **Working** |
 | Provider: OpenAI (`gpt-4o-mini`) | **Working** — needs `OPENAI_API_KEY` |
 | Provider: Gemini (`gemini-2.5-flash`) | **Working** — needs `GEMINI_API_KEY` |
 | Provider: Ollama (`llama3.2`) | **Working** — runs locally, no key needed |
@@ -44,6 +46,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Orchestrator (parallel fan-out, failure isolation) | **Working** |
 | Constraint extraction (`$15`, `within 1 mile`, `4 stars`) | **Working** |
 | Intent detection (price / distance / rating / general) | **Working** |
+| Demo UI — axis priority picker (overrides detection) | **Working** |
 | Ranker — semantic similarity (Ollama embeddings) | **Working** |
 | Ranker — three-axis gap scoring (P1/P2/P3) | **Working** |
 | Ranker — multi-intent axis weighting | **Working** |
@@ -62,7 +65,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **82 passing** |
+| Tests | **106 passing** |
 
 ---
 
@@ -163,6 +166,14 @@ useful for ranking *within* the set of results that satisfy the constraint.
 Intent detection (price / distance / rating / general) shifts the axis weights
 — a price query gives P1 60% of the axis score, with P2 and P3 splitting the
 remaining 40%. All three axes always contribute — no winner-take-all.
+
+**The user can override the inferred intent.** The demo UI's priority picker
+(Auto · Price · Distance · Rating) sends the chosen axis as an NLIP submessage
+labeled `priority`; the server maps it to a `QueryIntent` and passes it to
+`handle_query(intent=...)`, skipping keyword detection. **Auto** sends nothing
+and keeps the inferred behaviour, so the picker is purely additive. An
+unrecognised value logs a warning and falls back to detection rather than
+erroring. Agent clients get the same control by attaching that submessage.
 
 Hard constraint filtering removes results that are more than 25% over budget
 or more than 0.5★ below the minimum rating before scoring begins. The P3 scale
@@ -430,6 +441,73 @@ GOOGLE_PLACES_API_KEY=your-key-here   # real distance; needs lat/lng per request
 
 ---
 
+### Authentication
+
+The app is behind GitHub OAuth. Visiting `/` without a session redirects to
+`/login`, so **you cannot use the app until this is configured** — a missing or
+mismatched OAuth setup looks like a login page you can never get past.
+
+**Every contributor needs their own OAuth App for local development.** An OAuth
+App has exactly one callback URL field, and the shared one is already pointed at
+the deployed site — so you cannot reuse the team's credentials for `localhost`
+without breaking production.
+
+**1. Create an OAuth App**
+
+Go to **https://github.com/settings/applications/new** and fill in:
+
+| Field | Value |
+|---|---|
+| Application name | `Angel Filter (local dev)` |
+| Homepage URL | `http://localhost:8005` |
+| Authorization callback URL | `http://localhost:8005/auth/github/callback` |
+
+The callback URL must match **exactly** — `http` not `https`, `localhost` not
+`127.0.0.1`, port `8005`, no trailing slash. A mismatch produces GitHub's
+"The redirect_uri is not associated with this application" page.
+
+**2. Generate a client secret**
+
+On the app's page, click **Generate a new client secret**. It is shown only
+once — copy it immediately.
+
+**3. Add the values to `.env`**
+
+```
+GITHUB_CLIENT_ID=your-client-id
+GITHUB_CLIENT_SECRET=your-client-secret
+GITHUB_OAUTH_CALLBACK_URL=http://localhost:8005/auth/github/callback
+
+# Comma-separated GitHub usernames allowed to sign in — add yours
+ANGEL_ALLOWED_USERS=adonisja,your-github-username
+
+# Random string used to sign session cookies
+ANGEL_SESSION_SECRET=any-long-random-string
+
+# false for local http; true only when serving over https
+ANGEL_COOKIE_SECURE=false
+```
+
+`.env` is read at startup, so **restart the server after changing it** —
+`--reload` watches `.py` files only.
+
+**Troubleshooting.** Every failure redirects back to `/login?error=...`, and the
+value names the stage that failed:
+
+| Landing page | Cause |
+|---|---|
+| GitHub "Be careful!" page | Callback URL doesn't match the one registered on the app |
+| `?error=exchange_failed` | Client secret wrong or truncated |
+| `?error=forbidden` | Auth worked, but your username isn't in `ANGEL_ALLOWED_USERS` |
+| `?error=state_mismatch` | Session cookie lost — check `ANGEL_SESSION_SECRET` is set and `ANGEL_COOKIE_SECURE=false` on http |
+
+**Rate limits.** Signed-in users get `ANGEL_USER_RATE_LIMIT` requests per
+`ANGEL_USER_RATE_WINDOW` seconds (default 30/60s), and the deployment stops
+serving after `ANGEL_DAILY_QUERY_LIMIT` queries per UTC day (default 500) to cap
+provider spend. Exceeding either returns HTTP 429.
+
+---
+
 ### Verifying your setup
 
 After starting the server, check that providers loaded correctly:
@@ -438,20 +516,23 @@ After starting the server, check that providers loaded correctly:
 curl http://localhost:8005/health
 ```
 
-You should see something like:
+In NLIP mode this returns `nlip_server`'s own health payload:
 ```json
-{
-  "ok": true,
-  "mode": "nlip",
-  "nlip_available": true,
-  "providers": ["openai", "gemini", "ollama"],
-  "uptime_seconds": 5.1
-}
+{"status": "healthy"}
 ```
 
-`mode` is `"nlip"` when the NLIP libraries are installed (the default) and
-`"fallback"` if they fail to import. If `providers` is empty, check your `.env`
-file and make sure the keys are set correctly.
+> **Note — this is not our handler.** `nlip_server.setup_server()` registers its
+> own `/health` route before ours, and FastAPI matches the first route
+> registered, so `angel_filter.server.health` is unreachable in NLIP mode. Our
+> richer `_health_response` (`ok`, `mode`, `nlip_available`, `providers`,
+> `uptime_seconds`) only serves on the fallback path. Confirmed by inspecting
+> `app.routes`: index 0 is `nlip_server.routes.health.health_check`, index 1 is
+> ours. Worth reconciling — until then `/health` cannot tell you which providers
+> loaded.
+
+To see which providers actually loaded, check the startup log — the server logs
+each provider it enables — or read the `providers_used` field on a query
+response.
 
 Run the test suite (no network or API keys needed):
 ```bash
@@ -462,7 +543,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 82 tests should pass.
+All 106 tests should pass.
 
 ---
 
@@ -472,7 +553,7 @@ All 82 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-82 tests covering:
+106 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -497,6 +578,10 @@ python3.12 -m pytest tests/ -v
   weights, consensus cap, and sponsored penalty are pinned directly
 - Google Places maps venues to real distances (haversine); user coordinates
   flow request → constraints → provider → a discriminating P2 axis
+- The NLIP session reads query, preference, and location as separate typed
+  submessages (a labeled preference never leaks into the query text), replies
+  with both a human-readable summary and a machine-readable JSON submessage
+  carrying the sponsored flag, and degrades to `None` on malformed location
 
 No tests require network or Ollama. `test_orchestrator.py` uses the mock
 provider and the keyword-fallback ranker; `test_ranker_embeddings.py` uses a
@@ -514,6 +599,7 @@ deterministically and offline.
 | `lunch under $15` | Budget constraint + price intent |
 | `best rated lunch spots near me` | Rating + distance intent together |
 | `Find me the top 3 lunch spots under $15, within 1 mile, rated at least 4 stars` | All three axes, hard filter, constraint injection |
+| Same query, switching the priority picker | User override beats inferred intent — the winner changes per axis |
 | Run any query twice | Cache hit — instant response, "from cache" badge |
 
 ---
@@ -522,12 +608,14 @@ deterministically and offline.
 
 ```
 angel_filter/
-  server.py             # FastAPI server + provider wiring
+  server.py             # NLIP session + fallback FastAPI server + provider wiring
   orchestrator.py       # parallel fan-out + ranker call
   ranker.py             # scoring: similarity + axis + consensus + penalty
   constraints.py        # natural language constraint extraction
   prompt.py             # shared prompt builder for AI providers
   cache.py              # in-memory query cache (3-hour TTL)
+  auth.py               # GitHub OAuth flow + username allowlist
+  limits.py             # per-user rate limit + daily query cap
   providers/
     base.py             # BaseProvider, ProviderResult, ProviderError
     openai_provider.py  # OpenAI gpt-4o-mini
@@ -538,16 +626,17 @@ angel_filter/
     google_places.py    # Google Places — real distance (needs user lat/lng)
     mock.py             # canned lunch data (tests only)
 static/
-  index.html            # demo UI (results + 3D plot + radar chart)
+  index.html            # demo UI (results + 3D plot + radar chart + priority picker)
+  login.html            # GitHub sign-in page
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
-  test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
+  test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_axis_scoring.py       # 16 tests — axis weighting with incomplete data
-  test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
+  test_google_places.py      # 11 tests — Google Places provider + haversine
+  test_ranker_embeddings.py  # 8 tests — embedding scoring path (stubbed)
   test_assemble_score.py     # 8 tests — the shared final-score formula
-  test_google_places.py      # 10 tests — Google Places provider + haversine
-  test_nlip_session.py       # 8 tests — NLIP message extraction + structured reply
+  test_ranker_async.py       # 6 tests — non-blocking, concurrent Ollama embeddings
 start.sh                # starts server on port 8005, loads .env
 pyproject.toml
 README.md
