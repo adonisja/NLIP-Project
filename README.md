@@ -70,7 +70,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **264 passing** |
+| Tests | **273 passing** |
 
 ---
 
@@ -347,6 +347,16 @@ deciding axis was ever measured.
 Scoring an absent axis as a neutral 0.5 would let a bare search result
 with no data land within 0.11 of a result that satisfies every constraint,
 which is less than the 0.20 sponsored penalty.
+
+**Withholding an axis is never an advantage.** Renormalising alone judged a
+partial result on its single best axis while a complete result was judged on the
+average of all three — so a venue disclosing only a strong price (0.90) beat one
+disclosing a good price, distance *and* rating (0.85 average). Disclosing more
+could only ever hurt, which inverts this section's whole point. An incomplete
+result is now pulled toward neutral in proportion to what it withheld: it still
+gets credit for what it disclosed, but it cannot outrank a result reporting the
+same value on every axis. A dominant axis carries more weight; it cannot make
+the other two irrelevant.
 
 So the axis weights are **renormalised over whichever axes actually have
 data**: a result with price and rating but no distance is judged on price and
@@ -732,7 +742,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 264 tests should pass.
+All 273 tests should pass.
 
 ---
 
@@ -742,7 +752,7 @@ All 264 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-264 tests covering:
+273 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation

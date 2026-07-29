@@ -552,7 +552,28 @@ def _axis_bonus(
             weighted_sum += w * 0.5
             total_weight += w
 
-    return weighted_sum / total_weight if total_weight else 0.5
+    if not total_weight:
+        return 0.5
+
+    disclosed = weighted_sum / total_weight
+
+    # Renormalising alone judged a partial result on its best axis *alone*,
+    # while a complete result was judged on the average of all three. A venue
+    # disclosing only a strong price scored 0.90; one disclosing a good price,
+    # distance and rating scored 0.85 — so telling us more could only ever hurt.
+    # Observed live: four results with "no data" on two axes outranked a result
+    # that reported everything.
+    #
+    # The intent-axis guard above only ever protected one axis, and on a GENERAL
+    # query there is no intent axis at all, so nothing was guarded.
+    #
+    # So pull an incomplete result toward neutral in proportion to what it
+    # withheld. It is still judged on what it disclosed — a genuinely cheap
+    # place still scores well on price — but it cannot outrank a result that
+    # disclosed the same value on every axis. Full disclosure is a no-op
+    # (coverage 1.0), so complete results are scored exactly as before.
+    coverage = total_weight / sum(weights.values())
+    return disclosed * coverage + 0.5 * (1.0 - coverage)
 
 
 # --- Fuzzy consensus clustering -----------------------------------------------
