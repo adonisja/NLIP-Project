@@ -248,8 +248,16 @@ if _NLIP_AVAILABLE:
             # Memory cannot live on `self` — nlip_server builds a new session
             # object per request — so it is keyed by that token in CONVERSATIONS.
             token = msg.extract_conversation_token()
+            turn_mode = _extract_turn_mode(msg)
             conversation = CONVERSATIONS.get(token)
             previous = conversation.latest if conversation else None
+
+            # An explicit "new" ends the thread outright: the user told us this
+            # is a fresh search, so prior turns must not colour it even if the
+            # wording looks like a refinement.
+            if turn_mode == "new":
+                previous = None
+                conversation = None
 
             search_query = user_query
             refinement: QueryConstraints | None = None
@@ -257,6 +265,11 @@ if _NLIP_AVAILABLE:
             context_prefix = ""
 
             if previous is not None:
+                # Reaching here means the client sent a token matching a live
+                # conversation and did not say "new", so this turn belongs to
+                # the thread. The flag's real work is the "new" case above,
+                # which ends the thread outright — here we only need to know
+                # whether there is a recognisable adjustment to apply.
                 if looks_like_a_refinement(user_query):
                     # "cheaper than that" carries the adjustment but not the
                     # subject; the previous turn supplies what we are searching
@@ -268,9 +281,10 @@ if _NLIP_AVAILABLE:
                         user_query, previous.query, "; ".join(notes) or "no change",
                     )
                 else:
-                    # Not a pattern we recognise. Hand the models the recent
-                    # history so a vaguer follow-up still resolves — the
-                    # fallback path, paid for in tokens only when needed.
+                    # A follow-up with no recognisable delta ("what about
+                    # vegetarian options"). Hand the models the recent history
+                    # so it still resolves — the fallback path, paid for in
+                    # tokens only when needed.
                     context_prefix = build_context_prefix(conversation)
 
             # Cache on the same (query, composed-preference) key the REST path
@@ -643,6 +657,7 @@ else:
 _PREFERENCE_LABEL = "preference"
 _LOCATION_LABEL = "user_location"
 _PRIORITY_LABEL = "priority"
+_TURN_MODE_LABEL = "turn_mode"
 
 
 def _extract_query(msg) -> str:
@@ -683,6 +698,23 @@ def _extract_preference(msg) -> str | None:
     if sub is not None and isinstance(sub.content, str) and sub.content.strip():
         return sub.content.strip()
     return None
+
+
+def _extract_turn_mode(msg) -> str | None:
+    """Whether the client says this turn continues the conversation.
+
+    Returns "continue", "new", or None when the client did not say. An explicit
+    signal beats inferring from phrasing, which is wrong in both directions: a
+    genuinely new search containing "cheaper" reads as a refinement, and a
+    follow-up phrased unusually reads as new. None keeps the phrase-based
+    heuristic, so an agent client that knows nothing about this label behaves
+    exactly as before.
+    """
+    sub = _labeled(msg, _TURN_MODE_LABEL)
+    if sub is None or not isinstance(sub.content, str):
+        return None
+    value = sub.content.strip().lower()
+    return value if value in ("continue", "new") else None
 
 
 def _extract_priority(msg) -> QueryIntent | None:
