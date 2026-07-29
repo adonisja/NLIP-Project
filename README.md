@@ -43,6 +43,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Provider: Brave Search | **Ready** — needs `BRAVE_API_KEY` |
 | Provider: Google Places (real distance) | **Working** — needs `GOOGLE_PLACES_API_KEY` + user lat/lng |
 | Distance enrichment (geocodes other providers' venues) | **Working** — same key; fills P2 for non-Places results |
+| Enrichment cost controls (shortlist · venue cache · ceiling) | **Working** — see [Distance enrichment cost](#distance-enrichment-cost) |
 | Provider: Mock (canned lunch data for tests) | **Working** (tests only, not in server build) |
 | Orchestrator (parallel fan-out, failure isolation) | **Working** |
 | Constraint extraction (`$15`, `within 1 mile`, `4 stars`) | **Working** |
@@ -66,7 +67,7 @@ All changes go through pull requests — no direct commits to `main`, including 
 | Demo UI — provider breakdown panel | **Working** |
 | Demo UI — query history dropdown | **Working** |
 | Demo UI — browser geolocation (sends `lat`/`lng` for distance) | **Working** — best-effort; degrades if the user declines |
-| Tests | **203 passing** |
+| Tests | **212 passing** |
 
 ---
 
@@ -249,6 +250,29 @@ filter skips titles that look like articles rather than places ("The 10 Best
 Tacos in Brooklyn" would geocode to *something*, and that something would be
 wrong). Enrichment needs `GOOGLE_PLACES_API_KEY` and a user location; without
 either it is a no-op.
+
+#### Distance enrichment cost
+
+Every geocode is a billed Places call, and the fan-out returns ~40 results while
+the user sees 5 — so left unbounded a single query cost **17 lookups**, most of
+them for results nobody would ever read. Three layers bound it:
+
+| Layer | Env var | What it does |
+|---|---|---|
+| **Shortlist** | `ANGEL_GEOCODE_SHORTLIST` (12) | Preranks on the signals already free — keyword overlap plus whichever of price and rating the provider disclosed — and only geocodes the top slice. Results already carrying a distance are always kept, since they cost nothing. |
+| **Venue cache** | — | Venue name → coordinates, held for the process lifetime. The same places recur constantly across queries and users, so repeat runs converge toward zero. Unresolvable names are cached too, so a hallucinated venue is not retried forever. |
+| **Ceiling** | `ANGEL_GEOCODE_MAX_LOOKUPS` (15) | Hard cap per query as a backstop. Titles past it keep `distance=None` and stay honestly unscored. |
+
+`ANGEL_GEOCODE_ENABLED=false` turns enrichment off entirely; P2 then reverts to
+Google Places only, exactly as before the feature existed.
+
+Measured on the same repeated query, clearing the *query* cache each run so the
+full pipeline executes every time: **17 → 6 → 4 → 2** lookups.
+
+The shortlist is deliberately much larger than `top_k`. Distance carries 60% of
+the axis score on a distance query, so it has to be able to reorder the final
+ranking — a shortlist the size of `top_k` would fix the winner before the
+deciding axis was ever measured.
 
 Scoring an absent axis as a neutral 0.5 would let a bare search result
 with no data land within 0.11 of a result that satisfies every constraint,
@@ -629,7 +653,7 @@ python3.12 -m pytest tests/ -v
 python -m pytest tests/ -v
 ```
 
-All 203 tests should pass.
+All 212 tests should pass.
 
 ---
 
@@ -639,7 +663,7 @@ All 203 tests should pass.
 python3.12 -m pytest tests/ -v
 ```
 
-203 tests covering:
+212 tests covering:
 - End-to-end pipeline with all providers
 - Sponsored penalty applied and visible in scores
 - Provider failure isolation
@@ -734,7 +758,7 @@ static/
   login.html            # GitHub sign-in page
   plotly.min.js         # Plotly served locally (gitignored, download once)
 tests/
-  test_geocode.py            # 44 tests — distance enrichment, locality, venue filter
+  test_geocode.py            # 53 tests — enrichment, locality, venue filter, cost guards
   test_nlip_session.py       # 32 tests — NLIP multipart handling + priority picker
   test_orchestrator.py       # 25 tests — pipeline, intent, constraints, geo distance
   test_rest_priority.py      # 27 tests — REST /query priority parity + cache keying

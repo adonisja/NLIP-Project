@@ -40,6 +40,51 @@ _TIMEOUT = 10
 # latency benefit — they overlap fine at this width.
 _MAX_CONCURRENCY = 8
 
+
+def _enabled() -> bool:
+    """Whether enrichment may run at all.
+
+    Read per call rather than at import so a deployment can flip it without a
+    restart, and so tests can toggle it. Defaults on: enrichment is what makes
+    P2 discriminate for anything other than Google Places.
+    """
+    return os.getenv("ANGEL_GEOCODE_ENABLED", "true").strip().lower() not in (
+        "false", "0", "no", "off",
+    )
+
+
+def _max_lookups() -> int:
+    """Hard ceiling on distinct geocode calls per query.
+
+    A backstop, not the main control — the shortlist below is what normally
+    keeps the count down. This exists so a pathological run (many providers,
+    all returning distinct venue names) cannot quietly cost 40 calls. Titles
+    past the ceiling keep distance=None, which the ranker already handles as
+    honestly-unscored rather than as a bad value.
+    """
+    try:
+        return max(0, int(os.getenv("ANGEL_GEOCODE_MAX_LOOKUPS", "15")))
+    except ValueError:
+        return 15
+
+
+# Venue name -> coordinates, retained for the life of the process. Venue names
+# repeat heavily across queries and across users ("Joe's Pizza" is in almost
+# every Manhattan lunch result), so without this the same handful of places is
+# re-geocoded on every run. A None value is cached too: a name that resolved to
+# nothing, or to an unrelated place, should not be retried on the next query.
+_coord_cache: dict[str, tuple[float, float] | None] = {}
+
+
+def geocode_cache_stats() -> dict[str, int]:
+    """Size of the process-wide venue cache, for /health and debugging."""
+    resolved = sum(1 for v in _coord_cache.values() if v is not None)
+    return {
+        "venues_cached": len(_coord_cache),
+        "venues_resolved": resolved,
+        "venues_unresolvable": len(_coord_cache) - resolved,
+    }
+
 # Skip titles that clearly are not venues. A web-search result like "The 10
 # Best Tacos in Brooklyn" would geocode to *something*, and that something
 # would be wrong — a listicle is not a place you can walk to.
@@ -260,6 +305,66 @@ async def _lookup_one(client, title: str, lat: float, lng: float, api_key: str):
     return float(lat_v), float(lng_v)
 
 
+def _shortlist_size() -> int:
+    """How many candidates survive the prerank and become eligible for geocoding."""
+    try:
+        return max(1, int(os.getenv("ANGEL_GEOCODE_SHORTLIST", "12")))
+    except ValueError:
+        return 12
+
+
+def shortlist_for_enrichment(
+    results: list[ProviderResult],
+    query: str,
+    constraints,
+    limit: int | None = None,
+) -> list[ProviderResult]:
+    """Pick the candidates worth spending a geocode call on.
+
+    The fan-out returns ~40 results and the user sees 5, so geocoding everything
+    pays for 35 answers nobody reads. This scores each result on the signals we
+    already have for free — keyword overlap with the query, plus whichever of
+    price and rating the provider disclosed — and keeps the top slice.
+
+    The shortlist is deliberately much larger than top_k. Distance carries 60%
+    of the axis score on a distance query, so it has to be able to reorder the
+    final ranking; a shortlist barely bigger than top_k would decide the winner
+    before the deciding axis was even measured. At 12-for-5 a result has to be
+    well outside contention on every other signal before its distance stops
+    mattering.
+
+    Results that already carry a distance are always kept — they cost nothing —
+    and the ordering here never reaches the user: it only decides who gets
+    measured, after which the real ranker scores everything from scratch.
+    """
+    limit = limit or _shortlist_size()
+    if len(results) <= limit:
+        return results
+
+    from angel_filter.ranker import _compute_gap_scores, _tokens
+
+    q_tokens = _tokens(query or "")
+
+    def cheap_score(r: ProviderResult) -> float:
+        text = f"{r.title or ''} {r.snippet or ''}"
+        overlap = len(q_tokens & _tokens(text)) / len(q_tokens) if q_tokens else 0.0
+        axes = _compute_gap_scores(r, constraints)
+        # Only axes the provider actually populated; an absent one is a 0.5
+        # placeholder and would flatter a result that disclosed nothing.
+        real = [
+            axes[k] for k, present in
+            (("P1_price", r.price is not None), ("P3_rating", r.rating is not None))
+            if present
+        ]
+        axis_part = sum(real) / len(real) if real else 0.5
+        return 0.5 * overlap + 0.5 * axis_part
+
+    ranked = sorted(results, key=cheap_score, reverse=True)
+    keep = {id(r) for r in ranked[:limit]}
+    # Preserve the caller's ordering; only membership matters here.
+    return [r for r in results if id(r) in keep or r.distance is not None]
+
+
 async def enrich_distances(
     results: list[ProviderResult],
     user_lat: float | None,
@@ -279,6 +384,9 @@ async def enrich_distances(
     api_key = api_key or os.getenv("GOOGLE_PLACES_API_KEY")
     if not api_key or user_lat is None or user_lng is None:
         return 0
+    if not _enabled():
+        logger.debug("Distance enrichment disabled by ANGEL_GEOCODE_ENABLED")
+        return 0
 
     pending = [
         r for r in results
@@ -292,41 +400,63 @@ async def enrich_distances(
     for r in pending:
         by_title.setdefault(r.title.strip(), []).append(r)
 
-    import httpx
+    # Serve anything already known from a previous query before spending a call.
+    # A cached None counts as known — a name that resolved to nothing, or to an
+    # unrelated place, should not be retried every time it appears.
+    to_fetch = [t for t in by_title if t not in _coord_cache]
 
-    sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+    # Backstop against a pathological run. Titles past the ceiling keep
+    # distance=None, which the ranker treats as honestly unscored.
+    ceiling = _max_lookups()
+    if len(to_fetch) > ceiling:
+        logger.info(
+            "Geocode ceiling: %d distinct titles, looking up %d "
+            "(ANGEL_GEOCODE_MAX_LOOKUPS)", len(to_fetch), ceiling,
+        )
+        to_fetch = to_fetch[:ceiling]
 
-    async def resolve(client, title: str):
-        async with sem:
-            return title, await _lookup_one(client, title, user_lat, user_lng, api_key)
+    if to_fetch:
+        import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            pairs = await asyncio.gather(
-                *(resolve(client, t) for t in by_title),
-                return_exceptions=True,
-            )
-    except Exception as exc:
-        logger.warning("Distance enrichment aborted: %s", exc)
-        return 0
+        sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+
+        async def resolve(client, title: str):
+            async with sem:
+                return title, await _lookup_one(client, title, user_lat, user_lng, api_key)
+
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                fetched = await asyncio.gather(
+                    *(resolve(client, t) for t in to_fetch),
+                    return_exceptions=True,
+                )
+        except Exception as exc:
+            logger.warning("Distance enrichment aborted: %s", exc)
+            fetched = []
+
+        for item in fetched:
+            if isinstance(item, BaseException) or item is None:
+                continue
+            title, coords = item
+            _coord_cache[title] = coords
+
+    # Everything now answerable from the cache; titles skipped by the ceiling
+    # are simply absent and stay unscored.
+    pairs = [(t, _coord_cache[t]) for t in by_title if t in _coord_cache]
 
     enriched = 0
-    for pair in pairs:
-        # return_exceptions=True: a task that blew up arrives as the exception.
-        if isinstance(pair, BaseException) or pair is None:
-            continue
-        title, coords = pair
-        if coords is None:
+    for title, coords in pairs:
+        if coords is None:  # cached as unresolvable
             continue
         miles = round(haversine_miles(user_lat, user_lng, coords[0], coords[1]), 2)
         for r in by_title[title]:
             r.distance = miles
             enriched += 1
 
-    if enriched:
+    if enriched or to_fetch:
         logger.info(
-            "Distance enrichment: resolved %d/%d titles, filled %d results",
-            sum(1 for p in pairs if not isinstance(p, BaseException) and p and p[1]),
-            len(by_title), enriched,
+            "Distance enrichment: %d titles, %d looked up, %d served from cache, "
+            "%d results filled",
+            len(by_title), len(to_fetch), len(by_title) - len(to_fetch), enriched,
         )
     return enriched
