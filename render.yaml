@@ -2,37 +2,39 @@ services:
   - type: web
     name: angel-filter
     runtime: python
+    # requirements.txt is generated from poetry.lock, so this installs exactly
+    # what CI tests — including the NLIP libraries. Check /health after deploy:
+    # "mode" must be "nlip", or the UI cannot search.
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn angel_filter.server:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.3"
-      - key: ANGEL_COOKIE_SECURE
-        value: "true"
-      - key: ANGEL_COOKIE_SAMESITE
-        value: lax
-      # Set these in Render dashboard — never commit secrets
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: OLLAMA_MODEL
-        sync: false
-      - key: BRAVE_API_KEY
-        sync: false
-      - key: GITHUB_CLIENT_ID
-        sync: false
-      - key: GITHUB_CLIENT_SECRET
-        sync: false
-      - key: GITHUB_OAUTH_CALLBACK_URL
-        sync: false
-      - key: ANGEL_ALLOWED_USERS
-        sync: false
-      - key: ANGEL_SESSION_SECRET
-        sync: false
+
+      # There is no login: anyone with the URL can search, and every search
+      # spends provider credit. These limits are the only protection.
       - key: ANGEL_DAILY_QUERY_LIMIT
         value: "200"
       - key: ANGEL_USER_RATE_LIMIT
         value: "20"
       - key: ANGEL_USER_RATE_WINDOW
         value: "60"
+      # Render's proxy puts the caller's IP in X-Forwarded-For. 1 = trust the
+      # entry it adds. Verify after deploying (docs/SETUP.md, "Deploying").
+      - key: ANGEL_TRUSTED_PROXY_HOPS
+        value: "1"
+
+      # Provider keys — set in the Render dashboard, never commit them.
+      # OPENAI_API_KEY also provides embeddings, since Ollama can't run here.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: BRAVE_API_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: WATSONX_API_KEY
+        sync: false
+      - key: WATSONX_PROJECT_ID
+        sync: false
