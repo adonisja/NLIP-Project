@@ -4,7 +4,61 @@ What's unfinished as of the handoff (October 2026), roughly in priority
 order. Each item says what's wrong, where to look, and a way in. None of them
 is fully specified, so talk to your mentor before starting the bigger ones.
 
+Bugs (B-numbered) are being fixed before the handoff, and each entry is
+removed when its fix merges. Numbered items are starter tasks for the new
+team.
+
 ---
+
+# Bugs being fixed before handoff
+
+## B1. Out-of-range ratings and prices break scoring
+
+Ratings and prices from the AI providers aren't range-checked. A model that
+answers `"rating": "92%"` produces a rating of 92, which scores 18.4 on the
+P3 axis instead of at most 1. In a test, that result scored 4.46 against 0.80
+for an honest 4.8★ result. That breaks the 0–1 score range, and no penalty can
+pull it back down. Negative prices push P1 above 1 the same way.
+
+**Fix:** drop out-of-range values (rating outside 0–5, negative price) where
+provider results come in, and clamp every axis score to 0–1 in
+`_compute_gap_scores` as a second line of defence.
+
+## B2. A vague follow-up can be served another conversation's answer
+
+Follow-ups the refinement parser doesn't recognise ("what about vegetarian
+options") are sent to the providers with the conversation's earlier turns
+prepended. The query cache key leaves that context out. In a test, a taco
+conversation's follow-up was answered from a sushi conversation's cached
+result, and the providers were never called. The UI's location presets make
+this likely, since everyone on a preset shares coordinates and so shares a
+cache key.
+
+**Fix:** include the context in the cache key.
+
+## B3. An embedding failure fails the whole search
+
+The ranker checks once whether Ollama or OpenAI embeddings are available and
+keeps that answer forever. If the backend fails afterwards, `rank()` raises
+and the whole search fails, after the providers have already been paid for.
+This keeps happening on every search until a restart. On Render, an OpenAI
+rate-limit error on the embeddings call would do the same. The Ollama client
+is also created with no timeout, so a stalled Ollama hangs every search.
+
+**Fix:** if embedding fails, fall back to keyword scoring for that search and
+check the backend again next time. Give the Ollama client a timeout.
+
+## B4. `/metrics` doesn't count searches made through `/nlip/`
+
+The query counter, latency histogram, and sponsored-penalty counter are only
+updated in the `/query` handlers. The UI searches through `/nlip/`, so the
+metrics show close to zero for real use.
+
+**Fix:** record the same metrics in the NLIP session.
+
+---
+
+# Starter tasks
 
 ## 1. Design and build login and access control
 
@@ -95,6 +149,10 @@ result:
 - running more than one worker gives each worker its own limits and cache, so
   the caps no longer hold
 
+The query cache also never deletes expired entries: a stale entry is only
+skipped when read, so memory grows until a restart (the daily cap bounds how
+fast).
+
 SQLite is enough for one instance; Redis if you scale out. The venue cache
 matters most for cost: it's what brings Places lookups down to nearly zero on
 repeat queries.
@@ -107,7 +165,26 @@ so embeddings always go to `localhost:11434` (or the `ollama` library's own
 `OLLAMA_HOST` variable). Pass the configured URL through so a remote Ollama
 works for both.
 
-## 5. Smaller cleanups
+## 5. Validate location input
+
+`_extract_location` in `server.py` (NLIP) and the `lat`/`lng` fields of
+`POST /query` accept any number. NaN, infinity, and out-of-range coordinates
+(latitude 500) get through, and so does `true`, because Python treats a
+boolean as an integer. Bad coordinates then go to Google Places (which
+rejects them, failing that provider) and into distance math. Reject anything
+outside −90…90 / −180…180 or not finite, and treat it the same as no location.
+A good first issue: small, self-contained, easy to test.
+
+## 6. Say when nothing met the user's limits
+
+When every result breaks a hard limit (all over budget, say),
+`_apply_hard_constraints` in `ranker.py` returns all of them unfiltered, and
+the UI shows them as if they qualified. Showing something is reasonable, but
+the reply should say "nothing met your budget, here are the closest". That
+means a flag on the response, a line in the NLIP text reply, and a notice in
+the UI.
+
+## 7. Smaller cleanups
 
 - **Brave returns no structured fields.** Its results only ever compete on
   text similarity. Parsing prices or ratings out of snippets would help, or
