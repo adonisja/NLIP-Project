@@ -21,7 +21,7 @@ import logging
 import os
 import time
 
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from angel_filter.cache import CACHE
@@ -185,6 +185,41 @@ async def _run_search(**kwargs):
     if sponsored:
         SPONSORED_PENALTY_COUNT.inc(sponsored)
     return response
+
+
+async def _rest_search(body) -> dict:
+    """POST /query, shared by both server modes: cache, search, serialise.
+
+    The two /query handlers were separate copies and had drifted: only the
+    fallback one used the cache, so in NLIP mode every REST call paid for a
+    fresh fan-out. `body` is the mode's QueryIn model.
+    """
+    # Fold location into the cache's preference component so two users at
+    # different coordinates don't get served each other's distance results.
+    cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
+    cached = CACHE.get(body.query, cache_pref)
+    if cached:
+        logger.info("Cache hit for query: %r", body.query)
+        return cached
+
+    try:
+        response = await _run_search(
+            user_query=body.query,
+            user_preference=body.preference,
+            user_lat=body.lat,
+            user_lng=body.lng,
+            intent=_parse_priority(body.priority),
+        )
+    except Exception as exc:
+        logger.exception("Query failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})",
+        )
+
+    payload = {**_serialize_response(response), "cached": False}
+    CACHE.set(body.query, cache_pref, {**payload, "cached": True})
+    return payload
 
 
 # --- NLIP integration ---------------------------------------------------------
@@ -416,14 +451,7 @@ if _NLIP_AVAILABLE:
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
-        response = await _run_search(
-            user_query=body.query,
-            user_preference=body.preference,
-            user_lat=body.lat,
-            user_lng=body.lng,
-            intent=_parse_priority(body.priority),
-        )
-        return _serialize_response(response)
+        return await _rest_search(body)
 
     # With no login, these are open to anyone who can reach the server:
     # /history shows every caller's recent queries and /cache/clear wipes the
@@ -487,36 +515,7 @@ else:
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
-        from fastapi import HTTPException as _HTTPException
-
-        # Fold location into the cache's preference component so two users at
-        # different coordinates don't get served each other's distance results.
-        cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
-
-        # Return cached result if fresh
-        cached = CACHE.get(body.query, cache_pref)
-        if cached:
-            logger.info("Cache hit for query: %r", body.query)
-            return cached
-
-        try:
-            response = await _run_search(
-                user_query=body.query,
-                user_preference=body.preference,
-                user_lat=body.lat,
-                user_lng=body.lng,
-                intent=_parse_priority(body.priority),
-            )
-        except Exception as exc:
-            logger.exception("Query failed: %s", exc)
-            raise _HTTPException(
-                status_code=503,
-                detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
-            )
-
-        payload = {**_serialize_response(response), "cached": False}
-        CACHE.set(body.query, cache_pref, {**payload, "cached": True})
-        return payload
+        return await _rest_search(body)
 
     @app.get("/history")
     async def history():

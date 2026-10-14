@@ -199,3 +199,21 @@ def test_post_query_with_garbage_priority_does_not_500(rest_client):
     r = client.post("/query", json={"query": "lunch", "priority": "banana"})
     assert r.status_code == 200
     assert seen["intent"] is None
+
+
+def test_nlip_mode_query_route_uses_the_cache(rest_client):
+    """Both /query handlers share one cached path; NLIP mode used to skip the cache."""
+    client, seen = rest_client
+    calls = []
+    import angel_filter.server as server
+    original = server.ORCHESTRATOR.handle_query
+
+    async def counting(user_query, **kwargs):
+        calls.append(user_query)
+        return await original(user_query, **kwargs)
+
+    server.ORCHESTRATOR.handle_query = counting
+    first = client.post("/query", json={"query": "ramen"}).json()
+    second = client.post("/query", json={"query": "ramen"}).json()
+    assert len(calls) == 1, "the repeat REST query re-ran every provider"
+    assert (first["cached"], second["cached"]) == (False, True)
