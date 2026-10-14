@@ -58,31 +58,30 @@ request is rejected, *including `/nlip/`*; limits keyed by user once users
 exist; `.env.example`, `docs/SETUP.md`, and `render.yaml` updated with the new
 configuration.
 
-## 2. No live result is ever flagged as sponsored
+## 2. Measure and extend sponsored detection
 
-**Why it matters:** the sponsored penalty is the project's thesis, and right
-now it only ever fires on test data.
+**Why it matters:** the sponsored penalty is the project's thesis, and
+detection is what decides whether it fires on real searches.
 
-Every live provider hardcodes `sponsored=False` when building its results. See
-the `ProviderResult(...)` call at the end of each file in
-[angel_filter/providers/](../angel_filter/providers/). The penalty itself
-works: `_assemble_score` in [ranker.py](../angel_filter/ranker.py) applies it
-whenever the flag is set, and the UI already has a callout showing how far a
-sponsored result dropped. Nothing upstream sets the flag.
+No live provider reports ads, so [sponsorship.py](../angel_filter/sponsorship.py)
+infers them after the fan-out: links through ad networks, ad-click IDs and
+paid UTM tags, affiliate parameters, and disclosure text ("Sponsored",
+"paid partnership", "#ad"). The rules are deliberately conservative, and
+every flag records its reason, which the reply and the UI show.
 
-**Ways in:**
-- A provider whose API actually returns ads or sponsored listings, mapped
-  straight onto the flag.
-- Heuristics that detect sponsorship: affiliate or tracking parameters in URLs
-  (`utm_`, `ref=`, `aff`), known ad and affiliate domains, promotional
-  language, "sponsored" or "ad" markers in snippets.
-- Asking the AI providers to report whether a recommendation is a paid
-  placement. This is weak on its own, since models rarely know.
+What nobody knows yet is **how often it fires on real searches**. Brave
+returns organic web results and the AI providers don't see ads, so on
+today's providers it may rarely trigger. Ways in:
 
-Keep detection in a separate step (e.g. a `sponsorship.py` run in the
-orchestrator after fan-out) rather than scattering it across providers, so it
-can be tested with canned results. Getting the rate of false positives right
-matters: flagging organic results would undermine the project's claim.
+- **Measure it.** Log how many results each rule flags over a few hundred real
+  searches, and hand-check a sample of flagged *and* unflagged results for
+  false positives and misses.
+- **Add a provider that surfaces paid listings**, so the penalty has real ads
+  to act on. Check its terms of service first, and raise them in the PR.
+- **Add rules** where the measurements show misses: more ad and affiliate
+  networks, or listicle signals such as "best of" pages that are mostly
+  affiliate links. Each rule needs a test for what it must *not* match, next
+  to the existing ones in `tests/test_sponsorship.py`.
 
 ## 3. All state is in memory
 

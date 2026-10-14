@@ -58,8 +58,10 @@ Any bug fix should come with a test that fails without the fix.
    really know it. Never guess.** The ranker treats missing data specially
    (see [docs/DESIGN.md](docs/DESIGN.md#4-missing-data-is-not-average-data)),
    and a made-up distance or rating is worse than none.
-4. Set `sponsored` from real information if the provider has it. See
-   [KNOWN_ISSUES.md #2](docs/KNOWN_ISSUES.md#2-no-live-result-is-ever-flagged-as-sponsored).
+4. Set `sponsored=True` if the provider itself marks a result as an ad.
+   Otherwise leave it `False`: [sponsorship.py](angel_filter/sponsorship.py)
+   checks every result after the fan-out, so don't add detection inside a
+   provider.
 5. Raise `ProviderError` on recoverable failures. The orchestrator logs it and
    carries on with the other providers.
 6. Export it from `angel_filter/providers/__init__.py`, and register it in

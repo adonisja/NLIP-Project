@@ -37,6 +37,7 @@ class ProviderResult:
     distance: float | None = None            # P2 — distance in miles from user
     rating: float | None = None              # P3 — star rating 0-5
     sponsored: bool | None = None            # True if the provider flagged it as an ad
+    sponsored_reason: str | None = None      # why it was flagged (see sponsorship.py)
     raw: dict[str, Any] = field(default_factory=dict)  # the untouched original payload
 
     def __post_init__(self) -> None:

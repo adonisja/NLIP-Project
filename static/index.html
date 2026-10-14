@@ -732,7 +732,7 @@ function render(data) {
       <span class="chip" style="background:${PROVIDER_COLORS[best.provider] || "#202840"}22;color:${PROVIDER_COLORS[best.provider] || "var(--muted)"}">
         ${esc(best.provider)}
       </span>
-      ${best.sponsored ? `<span class="chip sponsored">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
+      ${best.sponsored ? `<span class="chip sponsored" title="${esc(best.sponsored_reason || "flagged as sponsored")}">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
       ${(best.consensus_count || 0) > 1 ? `<span class="chip agreed">${esc(String(best.consensus_count))} agreed</span>` : ""}
     </div>
     <div class="snippet" style="margin-top:8px"><em>${esc(best.rationale || "")}</em></div>
@@ -746,7 +746,7 @@ function render(data) {
       html += `<div class="card">
         <span class="rank">#${i + 2}</span>
         <span class="card-title">${esc(r.title)}</span>
-        ${r.sponsored ? `<span class="chip sponsored" style="font-size:11px;margin-left:6px">sponsored</span>` : ""}
+        ${r.sponsored ? `<span class="chip sponsored" style="font-size:11px;margin-left:6px" title="${esc(r.sponsored_reason || "flagged as sponsored")}">sponsored</span>` : ""}
         <div class="snippet">${esc(r.snippet || "")}</div>
         ${safeLink(r.url, "snippet")}
         <div class="axis-row">${axisChips(r)}</div>
@@ -754,7 +754,7 @@ function render(data) {
         <div class="row">
           <span class="chip">score ${esc(String(r.score))}</span>
           <span class="chip" style="background:${pColor}22;color:${pColor}">${esc(r.provider)}</span>
-          ${r.sponsored ? `<span class="chip sponsored">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
+          ${r.sponsored ? `<span class="chip sponsored" title="${esc(r.sponsored_reason || "flagged as sponsored")}">sponsored · penalized</span>` : `<span class="chip good">organic</span>`}
           ${(r.consensus_count || 0) > 1 ? `<span class="chip agreed">${esc(String(r.consensus_count))} agreed</span>` : ""}
         </div>
         <div class="snippet"><em>${esc(r.rationale || "")}</em></div>
@@ -874,12 +874,14 @@ function demotionCallout(results) {
   const lines = sponsored.map(sp => {
     const actual = results.indexOf(sp) + 1;
     const would = unpenalised.findIndex(x => x.r === sp) + 1;
+    // Why it was flagged, so a demotion is never a bare assertion.
+    const why = sp.sponsored_reason ? ` <span style="opacity:0.8">(${esc(sp.sponsored_reason)})</span>` : "";
     if (would >= actual) {
       // Penalised but already outranked on merit — say so rather than claim a
       // demotion that did not happen.
-      return `<div>${esc(sp.title)} — penalised, and did not place higher regardless.</div>`;
+      return `<div>${esc(sp.title)}${why} — penalised, and did not place higher regardless.</div>`;
     }
-    return `<div><strong>${esc(sp.title)}</strong> would have ranked
+    return `<div><strong>${esc(sp.title)}</strong>${why} would have ranked
       <span class="demotion-move">#${would}</span> — penalised to
       <span class="demotion-move">#${actual}</span>.</div>`;
   }).join("");
@@ -888,7 +890,7 @@ function demotionCallout(results) {
     <div class="demotion-head"><span>⚠</span><span>Sponsored content demoted</span></div>
     <div class="demotion-body">${lines}
       <div style="margin-top:6px;opacity:0.85">A flat −0.20 is subtracted from any
-      result a provider flagged as sponsored, regardless of how well it matches.</div>
+      result flagged as sponsored, regardless of how well it matches.</div>
     </div>
   </div>`;
 }

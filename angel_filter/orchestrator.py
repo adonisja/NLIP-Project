@@ -22,6 +22,7 @@ from angel_filter.geocode import (
 )
 from angel_filter.providers.base import BaseProvider, ProviderError, ProviderResult
 from angel_filter.ranker import QueryIntent, RankedResult, Ranker, detect_intent
+from angel_filter.sponsorship import flag_sponsored
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,10 @@ class Orchestrator:
                 intent=intent,
                 constraints=constraints,
             )
+
+        # No live provider reports ads, so infer sponsorship from the results
+        # themselves before ranking applies the penalty. See sponsorship.py.
+        flag_sponsored(all_results)
 
         # Most providers cannot report distance — the AI ones are forbidden from
         # guessing it and search results have no coordinates — so before this the

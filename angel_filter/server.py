@@ -664,6 +664,7 @@ def _serialize_response(response) -> dict:
                 "score": round(r.score, 3),
                 "rationale": r.rationale,
                 "sponsored": r.result.sponsored,
+                "sponsored_reason": r.result.sponsored_reason,
                 "consensus_count": r.consensus_count,
                 # The raw values behind the axis scores. A follow-up like
                 # "cheaper than that" has to anchor on what the top result
@@ -741,7 +742,10 @@ def _format_reply_from_payload(payload: dict) -> str:
         return "No results from any provider. Providers tried: " + ", ".join(used + failed)
     lines = [f"Ranked {len(results)} results (providers used: {', '.join(used)}):"]
     for i, r in enumerate(results, start=1):
-        tag = " [SPONSORED]" if r.get("sponsored") else ""
+        tag = ""
+        if r.get("sponsored"):
+            reason = r.get("sponsored_reason")
+            tag = f" [SPONSORED: {reason}]" if reason else " [SPONSORED]"
         lines.append(f"{i}. {r.get('title')}{tag} — {r.get('provider')} — {r.get('rationale')}")
         if r.get("url"):
             lines.append(f"   {r['url']}")

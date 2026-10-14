@@ -226,8 +226,24 @@ A flat deduction for any result with `sponsored=True`, no matter how well it
 matches. **This is the thesis of the project.** A paid placement has to be
 clearly better than the organic alternatives to reach the top.
 
-**Current gap:** the penalty works, but no live provider ever sets
-`sponsored=True`. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md#2-no-live-result-is-ever-flagged-as-sponsored).
+### Detection
+
+No live provider reports ads, so [sponsorship.py](../angel_filter/sponsorship.py)
+infers them after the fan-out, before ranking. A result is flagged when its
+URL goes through an ad network, carries an ad-click ID or a paid UTM tag, or
+has affiliate tracking, or when its text discloses payment ("Sponsored ·",
+"paid partnership", "#ad", "we may earn a commission"). A flag a provider set
+itself is kept as it is.
+
+Every flag records a `sponsored_reason`, which travels in the API payload, the
+NLIP text reply (`[SPONSORED: ad-click tracking (gclid)]`), and the UI's
+tooltip and demotion callout. A demotion is never a bare assertion.
+
+The rules lean towards missing an ad rather than flagging an organic result,
+because a false positive undermines the claim the project makes. That's why
+"sponsored by" is not a rule: event listings use it constantly. How often
+detection fires on real searches hasn't been measured; see
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md#2-measure-and-extend-sponsored-detection).
 
 **Before you change this:** don't remove, reduce, or route around the penalty
 without the team (and your mentor) agreeing. Several other numbers are sized
