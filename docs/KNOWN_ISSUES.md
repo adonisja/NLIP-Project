@@ -4,25 +4,7 @@ What's unfinished as of the handoff (October 2026), roughly in priority
 order. Each item says what's wrong, where to look, and a way in. None of them
 is fully specified, so talk to your mentor before starting the bigger ones.
 
-Bugs (B-numbered) are being fixed before the handoff, and each entry is
-removed when its fix merges. Numbered items are starter tasks for the new
-team.
-
 ---
-
-# Bugs being fixed before handoff
-
-## B4. `/metrics` doesn't count searches made through `/nlip/`
-
-The query counter, latency histogram, and sponsored-penalty counter are only
-updated in the `/query` handlers. The UI searches through `/nlip/`, so the
-metrics show close to zero for real use.
-
-**Fix:** record the same metrics in the NLIP session.
-
----
-
-# Starter tasks
 
 ## 1. Design and build login and access control
 
@@ -164,6 +146,10 @@ the UI.
   the exact commits, so nothing moves until someone runs `poetry lock` or
   `poetry update`. When you do, read the upstream changes, run the tests, and
   regenerate `requirements.txt` (the command is in its header).
+- **`POST /query` skips the cache in NLIP mode.** The fallback version reads
+  and writes the query cache; the NLIP-mode one in `server.py` always runs a
+  fresh fan-out. Both should behave the same (the NLIP session already
+  caches).
 - **`start.sh`** calls `python3.12` directly instead of `poetry run`, so it
   only works if you also pip-installed everything. Update it or delete it.
 - **Port defaults disagree.** Running `python -m angel_filter.server` defaults

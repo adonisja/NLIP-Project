@@ -167,6 +167,26 @@ def _health_response(mode: str, nlip_available: bool) -> dict:
     }
 
 
+async def _run_search(**kwargs):
+    """Run one fan-out through the orchestrator, recording it in /metrics.
+
+    Every route that searches goes through here. The metrics were once
+    recorded inline in the /query handlers only, so the NLIP session — the
+    path the UI actually uses — never showed up in them at all.
+    """
+    with QUERY_LATENCY.time():
+        try:
+            response = await ORCHESTRATOR.handle_query(**kwargs)
+        except Exception:
+            QUERY_COUNT.labels(status="error").inc()
+            raise
+    QUERY_COUNT.labels(status="success").inc()
+    sponsored = sum(1 for r in response.ranked if r.result.sponsored)
+    if sponsored:
+        SPONSORED_PENALTY_COUNT.inc(sponsored)
+    return response
+
+
 # --- NLIP integration ---------------------------------------------------------
 # Per nlip_server's README, we subclass NLIPApplication and NLIPSession, and
 # start the server via its helper. The exact import paths below mirror their
@@ -289,7 +309,7 @@ if _NLIP_AVAILABLE:
 
             payload = CACHE.get(search_query, cache_pref)
             if payload is None:
-                response = await ORCHESTRATOR.handle_query(
+                response = await _run_search(
                     user_query=search_query,
                     user_preference=preference,
                     user_lat=user_lat,
@@ -396,22 +416,13 @@ if _NLIP_AVAILABLE:
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
-        with QUERY_LATENCY.time():
-            try:
-                response = await ORCHESTRATOR.handle_query(
-                    user_query=body.query,
-                    user_preference=body.preference,
-                    user_lat=body.lat,
-                    user_lng=body.lng,
-                    intent=_parse_priority(body.priority),
-                )
-                QUERY_COUNT.labels(status="success").inc()
-                for r in response.ranked:
-                    if r.result.sponsored:
-                        SPONSORED_PENALTY_COUNT.inc()
-            except Exception:
-                QUERY_COUNT.labels(status="error").inc()
-                raise
+        response = await _run_search(
+            user_query=body.query,
+            user_preference=body.preference,
+            user_lat=body.lat,
+            user_lng=body.lng,
+            intent=_parse_priority(body.priority),
+        )
         return _serialize_response(response)
 
     # With no login, these are open to anyone who can reach the server:
@@ -488,26 +499,20 @@ else:
             logger.info("Cache hit for query: %r", body.query)
             return cached
 
-        with QUERY_LATENCY.time():
-            try:
-                response = await ORCHESTRATOR.handle_query(
-                    user_query=body.query,
-                    user_preference=body.preference,
-                    user_lat=body.lat,
-                    user_lng=body.lng,
-                    intent=_parse_priority(body.priority),
-                )
-                QUERY_COUNT.labels(status="success").inc()
-                for r in response.ranked:
-                    if r.result.sponsored:
-                        SPONSORED_PENALTY_COUNT.inc()
-            except Exception as exc:
-                QUERY_COUNT.labels(status="error").inc()
-                logger.exception("Query failed: %s", exc)
-                raise _HTTPException(
-                    status_code=503,
-                    detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
-                )
+        try:
+            response = await _run_search(
+                user_query=body.query,
+                user_preference=body.preference,
+                user_lat=body.lat,
+                user_lng=body.lng,
+                intent=_parse_priority(body.priority),
+            )
+        except Exception as exc:
+            logger.exception("Query failed: %s", exc)
+            raise _HTTPException(
+                status_code=503,
+                detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
+            )
 
         payload = {**_serialize_response(response), "cached": False}
         CACHE.set(body.query, cache_pref, {**payload, "cached": True})
