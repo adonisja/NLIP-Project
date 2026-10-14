@@ -1,0 +1,37 @@
+name: Keep the database awake
+
+# A free Supabase project pauses after about a week without database activity
+# (a few writes a day is enough to count). The app's own searches count, but a
+# quiet deployment could pause, so this writes a heartbeat row every 3 days.
+#
+# Needs the repository secret ANGEL_DATABASE_URL (Settings → Secrets and
+# variables → Actions). Without it, the job does nothing.
+#
+# GitHub disables scheduled workflows in a repository with no activity for 60
+# days; re-enable it from the Actions tab if that happens.
+
+on:
+  schedule:
+    - cron: "17 9 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Write a heartbeat row
+        env:
+          ANGEL_DATABASE_URL: ${{ secrets.ANGEL_DATABASE_URL }}
+        run: |
+          if [ -z "$ANGEL_DATABASE_URL" ]; then
+            echo "ANGEL_DATABASE_URL secret is not set; nothing to keep awake."
+            exit 0
+          fi
+          pip install "asyncpg>=0.29,<1"
+          python -m angel_filter.state heartbeat

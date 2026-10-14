@@ -342,17 +342,24 @@ go through these limits. `tests/test_limits.py` covers both routes.
 The query cache, conversation memory, rate limiter, daily counter, and the
 venue and locality geocode caches all go through one async store,
 [state.py](../angel_filter/state.py). It's in-process memory by default and
-Redis when `ANGEL_REDIS_URL` is set. Every entry has an expiry, so nothing
-grows forever: cache entries 3 hours, conversations 30 minutes after their
-last turn, a day's counter 2 days, geocodes 30 days.
+Postgres when `ANGEL_DATABASE_URL` is set (Supabase's free tier is the
+documented option). Every entry has an expiry: cache entries 3 hours,
+conversations 30 minutes after their last turn, a day's counter 2 days,
+geocodes 30 days. Postgres has no key expiry of its own, so expired rows are
+never returned, and the app deletes them every 10 minutes.
 
-- **The rate limit and daily cap are safe across workers.** The rate limit adds
-  the hit and counts in one Redis transaction, and the daily cap increments
-  first and undoes a rejected request, so two workers can't both take the
-  last slot.
-- **A Redis outage never fails a search.** Each operation falls back to an
-  in-process store, which is the old behaviour, and `/health` reports
-  `"reachable": false`.
+- **The rate limit and daily cap are safe across workers.** A rate-limit hit
+  takes a per-key advisory lock while it counts and inserts, and the daily cap
+  increments in one statement and undoes a rejected request, so two workers
+  can't both take the last slot. A test fires 20 simultaneous requests at 4
+  workers and checks exactly 5 get through.
+- **A database outage never fails a search.** Each operation falls back to an
+  in-process store, which is the old behaviour, and retries the database after
+  30 seconds. `/health` reports `"reachable": false`. Tests switch the fallback
+  off, so a broken backend fails them instead of hiding.
+- **The tables live in their own `angel_state` schema**, with row-level
+  security on. Supabase serves the `public` schema through its Data API, and
+  query history must not be readable with a project's public API key.
 - **Venue coordinates are keyed by the user's rough area as well as the
   title.** The lookup is biased towards the user, so "Joe's Pizza" near
   Manhattan and near LA are different places, and a shared cache must not mix
@@ -360,6 +367,6 @@ last turn, a day's counter 2 days, geocodes 30 days.
 - **Conversation tokens are hashed before becoming keys**, because the client
   chooses them.
 
-**Before you change this:** tests run on both backends. CI runs the suite a
-second time with `ANGEL_TEST_STORE=redis`, which uses an in-process fake
-Redis, and `tests/test_state.py` holds the two backends to the same behaviour.
+**Before you change this:** tests run on both backends. CI starts a throwaway
+Postgres and runs the suite a second time with `ANGEL_TEST_STORE=postgres`,
+and `tests/test_state.py` holds the two backends to the same behaviour.

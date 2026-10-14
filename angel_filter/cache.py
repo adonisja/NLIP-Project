@@ -1,8 +1,8 @@
 """Query result cache, TTL-based, kept in the shared store (see state.py).
 
 Keyed by (query, preference) normalized to lowercase stripped strings.
-Entries expire after TTL_SECONDS: in Redis the key itself expires, and in
-memory an expired entry is dropped the next time it is read.
+Entries expire after TTL_SECONDS: an expired entry is never returned, and
+the store deletes it later (see state.py).
 """
 
 from __future__ import annotations

@@ -23,9 +23,30 @@ os.environ.setdefault("OLLAMA_MODEL", "llama3.2")
 import pytest
 
 
+def reset_postgres(url: str) -> None:
+    """Empty the state tables in a test database (created on first use)."""
+    import asyncio
+
+    import asyncpg
+
+    async def run():
+        conn = await asyncpg.connect(url)
+        try:
+            await conn.execute("""
+                DO $$ BEGIN
+                  IF EXISTS (SELECT FROM pg_namespace WHERE nspname = 'angel_state') THEN
+                    TRUNCATE angel_state.kv, angel_state.hits;
+                  END IF;
+                END $$;""")
+        finally:
+            await conn.close()
+
+    asyncio.run(run())
+
+
 @pytest.fixture(autouse=True)
 def _fresh_state(monkeypatch):
-    """Give every test an empty in-memory store (see angel_filter/state.py).
+    """Give every test an empty state store (see angel_filter/state.py).
 
     The query cache, conversations, rate-limit counters and geocode caches all
     live in that store. Shared across tests, a query matching an earlier test's
@@ -33,18 +54,19 @@ def _fresh_state(monkeypatch):
     and enough requests across the suite would trip the rate limit in an
     unrelated test. Tests must not depend on execution order.
 
-    ANGEL_REDIS_URL is cleared so a developer's real Redis is never touched.
-    With ANGEL_TEST_STORE=redis, every test runs on an in-process fake Redis
-    instead, so the whole app is exercised on the Redis backend (CI does both).
+    ANGEL_DATABASE_URL is cleared so a developer's real database is never
+    touched. With ANGEL_TEST_STORE=postgres, every test instead runs on the
+    Postgres backend against ANGEL_TEST_DATABASE_URL (a throwaway database; CI
+    uses a service container), with the in-memory fallback disabled so a
+    backend error fails the test instead of hiding.
     """
     from angel_filter import state
 
-    monkeypatch.delenv("ANGEL_REDIS_URL", raising=False)
-    if os.getenv("ANGEL_TEST_STORE") == "redis":
-        import fakeredis
-
-        client = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
-        state.use_store(state.RedisStore("redis://fake", client=client))
+    monkeypatch.delenv("ANGEL_DATABASE_URL", raising=False)
+    if os.getenv("ANGEL_TEST_STORE") == "postgres":
+        url = os.environ["ANGEL_TEST_DATABASE_URL"]
+        reset_postgres(url)
+        state.use_store(state.PostgresStore(url, fallback=False))
     else:
         state.use_store(state.MemoryStore())
     yield

@@ -39,18 +39,25 @@ None of that carries over when you clone.
 poetry run pytest
 ```
 
-Tests must not need the network, API keys, Ollama, or Redis. Use
+Tests must not need the network, API keys, Ollama, or a database. Use
 `MockProvider` or canned responses, and set `ranker._ollama_available = False`
 for deterministic ranking. `tests/conftest.py` already sets `OLLAMA_MODEL` so
 the server module can be imported, and gives every test a fresh, empty state
 store.
 
-To run the suite on the Redis backend too, as CI does (it uses fakeredis, so
-no Redis server is needed):
+The Postgres state backend has its own tests, which skip unless a throwaway
+database is available. To run them, and the whole suite on Postgres, as CI
+does:
 
 ```bash
-ANGEL_TEST_STORE=redis poetry run pytest
+docker run -d --rm --name angel-pg -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16-alpine
+export ANGEL_TEST_DATABASE_URL=postgresql://postgres:test@localhost:5432/postgres
+poetry run pytest                              # includes the Postgres store tests
+ANGEL_TEST_STORE=postgres poetry run pytest    # the whole app on Postgres
 ```
+
+Never point `ANGEL_TEST_DATABASE_URL` at a real database: the tests empty
+its `angel_state` tables.
 
 Any bug fix should come with a test that fails without the fix.
 

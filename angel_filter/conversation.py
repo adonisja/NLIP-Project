@@ -114,7 +114,7 @@ class ConversationStore:
 
     Each conversation expires `ttl_seconds` after its latest turn. A restart
     with the in-memory store loses conversations, which degrades to every turn
-    being a fresh search; with Redis they survive it.
+    being a fresh search; with Postgres they survive it.
     """
 
     def __init__(self, ttl_seconds: int = TURN_TTL_SECONDS, store=None):

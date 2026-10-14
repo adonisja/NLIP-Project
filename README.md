@@ -206,7 +206,7 @@ angel_filter/
   prompt.py             prompt shared by the AI providers
   geocode.py            distance: neighbourhood lookup, venue geocoding
   conversation.py       multi-turn memory, keyed by the NLIP conversation token
-  state.py              shared state: in memory, or Redis when ANGEL_REDIS_URL is set
+  state.py              shared state: in memory, or Postgres (Supabase) when ANGEL_DATABASE_URL is set
   cache.py              query cache (3-hour TTL)
   limits.py             per-client rate limit + daily query cap
   providers/            one file per provider, plus base.py and mock.py

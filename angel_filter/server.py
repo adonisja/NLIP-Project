@@ -161,8 +161,9 @@ def _constraints_from_payload(payload: dict) -> QueryConstraints:
 async def _health_response(mode: str, nlip_available: bool) -> dict:
     store = get_store()
     state = {"backend": store.backend}
-    if store.backend == "redis":
-        # False means state is running on the in-process fallback right now.
+    if store.backend != "memory":
+        # False means state is running on the in-process fallback right now
+        # (database unreachable, or a free Supabase project has paused).
         state["reachable"] = await store.ping()
     return {
         "ok": True,

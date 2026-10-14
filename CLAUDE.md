@@ -19,8 +19,8 @@ original author (@adonisja) is their mentor.
 - FastAPI, via `nlip_server`, which wraps it
 - `nlip_sdk` and `nlip_server` from github.com/nlip-project
 - Ollama for local embeddings (`nomic-embed-text`) and as a provider
-- Shared state in `state.py`: in-process memory, or Redis when `ANGEL_REDIS_URL`
-  is set. Cache, conversations, limits and geocodes all go through it; never
+- Shared state in `state.py`: in-process memory, or Postgres (Supabase) when
+  `ANGEL_DATABASE_URL` is set. Cache, conversations, limits and geocodes all go through it; never
   keep request-spanning state in a module-level dict.
 - Pytest + pytest-asyncio
 
@@ -71,9 +71,10 @@ update `DEFAULT_EMBED_MODEL` and the docs.
 
 Run: `poetry run pytest`
 
-Tests must not require live network, API keys, Ollama, or Redis (each test
-gets a fresh in-memory store; `ANGEL_TEST_STORE=redis` reruns the suite on
-fakeredis, as CI does). Use `MockProvider`
+Tests must not require live network, API keys, Ollama, or a database (each
+test gets a fresh in-memory store). CI also runs the suite on a throwaway
+Postgres with `ANGEL_TEST_STORE=postgres`; Postgres-only tests skip unless
+`ANGEL_TEST_DATABASE_URL` is set. Use `MockProvider`
 or canned responses, and set `ranker._ollama_available = False` for
 deterministic runs.
 
