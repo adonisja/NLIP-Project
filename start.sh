@@ -1,7 +1,3 @@
 #!/bin/bash
-# Load .env if it exists
-if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
-fi
-PORT=8005
-python3.12 -m uvicorn angel_filter.server:app --reload --port $PORT
+# Start the dev server on the port the docs use. The package loads .env itself.
+exec poetry run uvicorn angel_filter.server:app --reload --port "${PORT:-8005}"

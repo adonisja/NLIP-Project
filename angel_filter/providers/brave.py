@@ -3,8 +3,7 @@
 Requires BRAVE_API_KEY in the environment. Get a free key at:
 https://api.search.brave.com/
 
-Brave is a reliable alternative to DuckDuckGo because it uses an official
-API with proper rate limits instead of scraping. Free tier allows 2,000
+Brave uses an official API with proper rate limits instead of scraping. Free tier allows 2,000
 queries/month which is plenty for demos and development.
 """
 

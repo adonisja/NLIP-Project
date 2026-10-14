@@ -39,7 +39,7 @@ Install Ollama from <https://ollama.com/download>.
 5. Use `copy .env.example .env` instead of `cp`.
 
 Everything else in the quickstart is the same. Run the server with
-`poetry run uvicorn ...`, not `./start.sh`.
+`poetry run uvicorn ...` (or `./start.sh` from Git Bash).
 
 ---
 

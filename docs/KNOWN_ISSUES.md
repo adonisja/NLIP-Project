@@ -124,29 +124,12 @@ the UI.
 
 ## 7. Smaller cleanups
 
-- **Brave returns no structured fields.** Its results only ever compete on
-  text similarity. Parsing prices or ratings out of snippets would help, or
-  drop Brave for a places-oriented API.
-- **The DuckDuckGo provider is unused.** `providers/duckduckgo.py` is exported
-  but never registered in `server.py`, and its Instant Answer API returns
-  almost nothing for this kind of query. Delete it, or register it on purpose.
+- **Brave returns pages, not places.** Brave's web search results have no
+  price, rating, or coordinates, so they only compete on text similarity (and
+  distance when enrichment can geocode the title). Places data would need
+  Brave's separate local search offering or a different places API; check the
+  plan and terms before building on either.
 - **Should the fallback server stay?** It was kept as insurance while NLIP
   installs were unreliable. They now install cleanly through Poetry and in
   deployments, and the UI can't search in fallback mode anyway, so it could
   go. It's a team decision. Until then, keep both branches in sync.
-- **The NLIP libraries track `main` in `pyproject.toml`.** `poetry.lock` pins
-  the exact commits, so nothing moves until someone runs `poetry lock` or
-  `poetry update`. When you do, read the upstream changes, run the tests, and
-  regenerate `requirements.txt` (the command is in its header).
-- **`POST /query` skips the cache in NLIP mode.** The fallback version reads
-  and writes the query cache; the NLIP-mode one in `server.py` always runs a
-  fresh fan-out. Both should behave the same (the NLIP session already
-  caches).
-- **`start.sh`** calls `python3.12` directly instead of `poetry run`, so it
-  only works if you also pip-installed everything. Update it or delete it.
-- **Port defaults disagree.** Running `python -m angel_filter.server` defaults
-  to port 8000; everything else uses 8005.
-- **Constraint parsing is regex-based.** It handles "$15", "less than 15
-  dollars", "within 1 mile", "walking distance", and "4.5+ stars", but not
-  spelled-out numbers ("under twenty bucks" yields no budget). See
-  [constraints.py](../angel_filter/constraints.py).

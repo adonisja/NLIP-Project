@@ -1,6 +1,6 @@
 """Base contract for all provider adapters.
 
-Every provider (Google, Bing/Copilot, DuckDuckGo, Anthropic free-tier, etc.)
+Every provider (OpenAI, Gemini, Brave, Google Places, ...)
 must implement the same async `query()` method so the proxy can fan out to
 all of them in parallel and normalize their responses.
 """
@@ -31,7 +31,7 @@ class ProviderResult:
     title: str
     snippet: str
     url: str | None = None
-    provider: str = ""                       # "claude", "openai", "gemini", "duckduckgo"...
+    provider: str = ""                       # "openai", "gemini", "brave", ...
     rank_in_provider: int = 0                # where this appeared in the provider's own list
     price: float | None = None               # P1 — price in dollars
     distance: float | None = None            # P2 — distance in miles from user

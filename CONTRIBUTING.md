@@ -68,6 +68,21 @@ Any bug fix should come with a test that fails without the fix.
 7. Add a test with canned responses (see
    [tests/test_google_places.py](tests/test_google_places.py)).
 
+## Updating the NLIP libraries
+
+`pyproject.toml` follows the `main` branch of `nlip-sdk` and `nlip-server`,
+but `poetry.lock` pins exact commits, so nothing changes until you choose to.
+To update:
+
+```bash
+poetry update nlip-sdk nlip-server
+poetry run pytest
+poetry export --without-hashes -f requirements.txt -o requirements.txt
+```
+
+Read what changed upstream first. The export step keeps deployments in step
+(CI fails if `requirements.txt` and `poetry.lock` disagree).
+
 ## Changing the ranker
 
 Read [docs/DESIGN.md](docs/DESIGN.md) first. In particular:
