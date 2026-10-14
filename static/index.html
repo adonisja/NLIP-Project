@@ -98,10 +98,6 @@
   #plot-radar { width: 100%; height: 420px; border-radius: 14px; overflow: hidden; background: var(--card); border: 1px solid var(--border); }
   .plot-unavailable { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 14px; }
 
-  /* Logout button */
-  .logout { position: fixed; top: 16px; left: 16px; background: var(--card); color: var(--muted); border: 1px solid #2a3450; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer; }
-  .logout:hover { color: var(--ink); border-color: #3a4868; }
-  .logout:disabled { opacity: 0.5; cursor: wait; }
 
   /* Preset demo query buttons */
   .demo-queries { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
@@ -178,7 +174,6 @@
 </style>
 </head>
 <body>
-<button id="logout" class="logout" type="button">Log out</button>
 <main>
   <h1>Angel Filter</h1>
   <p class="sub">Asks multiple AI providers, finds what they agree on, ranks by what <em>you</em> care about.</p>
@@ -254,7 +249,6 @@ const form     = document.getElementById("f");
 const out      = document.getElementById("out");
 const btn      = document.getElementById("go");
 const vizWrap  = document.getElementById("viz-wrap");
-const logoutBtn = document.getElementById("logout");
 
 const PROVIDER_COLORS = {
   gemini:     "#0f766e",
@@ -274,17 +268,6 @@ function setDemo(query) {
   document.getElementById("q").focus();
   document.getElementById("f").requestSubmit();
 }
-
-logoutBtn.addEventListener("click", async () => {
-  logoutBtn.disabled = true;
-  try {
-    await fetch("/logout", { method: "POST" });
-  } catch (_) {
-    // redirect even if network call fails
-  } finally {
-    location.href = "/login";
-  }
-});
 
 // Best-effort browser geolocation. Resolves to {lat, lng} when the user grants
 // permission, or null on denial / no support / timeout. Never rejects: distance
@@ -611,7 +594,12 @@ form.addEventListener("submit", async (e) => {
       body: JSON.stringify(buildNlipMessage(
         query, preference, loc, selectedPriority, turnMode === "continue")),
     });
-    if (res.status === 401) { location.href = "/login"; return; }
+    // 429 = per-client rate limit or the daily budget; the server's detail
+    // says which and when to retry, so show it rather than a bare status.
+    if (res.status === 429) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || "Too many requests — try again shortly.");
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = parseNlipReply(await res.json());
     const scores = (data.results || []).map(r => r.score).filter(s => isFinite(s));

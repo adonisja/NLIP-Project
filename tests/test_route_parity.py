@@ -68,18 +68,16 @@ def test_route_is_registered_exactly_once(path):
     assert len(hits) == 1, f"{path} has {len(hits)} registrations"
 
 
-@pytest.mark.parametrize("path", ["/history", "/cache/clear", "/metrics"])
-def test_diagnostic_routes_require_a_session(path):
-    """These expose other users' queries and let a caller wipe shared state.
+def test_query_routes_are_rate_limited():
+    """Both query routes spend provider money, so both must be metered.
 
-    The fallback copies predate the auth layer and have no dependency at all;
-    the NLIP versions must not repeat that.
+    /query carries the limit as a dependency. /nlip/ is registered by
+    nlip_server, so it is metered by middleware instead — tests/test_limits.py
+    exercises that path end to end.
     """
-    route = next(r for r in server.app.routes if getattr(r, "path", None) == path)
+    route = next(r for r in server.app.routes if getattr(r, "path", None) == "/query")
     names = [d.call.__name__ for d in route.dependant.dependencies]
-    assert any("session" in n or "limits" in n for n in names), (
-        f"{path} has no auth dependency (found {names})"
-    )
+    assert "enforce_query_limits" in names, f"/query is not rate limited (found {names})"
 
 
 # --- NLIP caching --------------------------------------------------------------

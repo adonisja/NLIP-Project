@@ -9,7 +9,7 @@ These pin the parity: one shared parser (`_parse_priority`) behind both
 transports, and — the subtler half — the cache key includes the priority, so a
 Price query cannot be served a Rating query's cached ranking.
 
-The handlers themselves sit behind auth and rate-limit dependencies, so these
+The handlers themselves sit behind a rate-limit dependency, so these
 exercise the units the handlers call rather than booting an HTTP client. That
 matches how the rest of the suite is written and keeps the run network-free.
 """
@@ -140,11 +140,11 @@ def _reset_cache(cache) -> None:
 
 @pytest.fixture
 def rest_client(monkeypatch):
-    """A TestClient with auth stubbed and the orchestrator spied.
+    """A TestClient with rate limits stubbed and the orchestrator spied.
 
-    /query sits behind enforce_query_limits (session + rate limit + daily cap).
-    Overriding that one dependency is enough to reach the handler without
-    standing up an OAuth session.
+    /query sits behind enforce_query_limits (rate limit + daily cap).
+    Overriding that one dependency keeps these tests independent of the
+    limit counters.
     """
     from fastapi.testclient import TestClient
     import angel_filter.server as server
