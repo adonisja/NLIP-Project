@@ -110,8 +110,46 @@ needs thought before you deploy.
 
 Both `/query` and `/nlip/` count against these. With no login, they're the
 only thing limiting spend on a public deployment, and the daily cap is the one
-that holds even against a caller with many IP addresses. The counters live in
-memory, so they reset whenever the server restarts.
+that holds even against a caller with many IP addresses. Where the counters
+live is the next section.
+
+### Shared state (Redis)
+
+The query cache, conversations, rate-limit counters, daily count, and geocode
+caches live in one store ([state.py](../angel_filter/state.py)):
+
+| `ANGEL_REDIS_URL` | Where state lives | Use it for |
+|---|---|---|
+| unset (default) | This process's memory. Lost on restart, not shared between workers. | Local development and tests. Nothing to set up. |
+| a Redis URL | Redis. Survives restarts, shared by every worker and instance. | Any deployment, so the limits and the daily cap actually hold. |
+
+**Free option: [Upstash](https://upstash.com).** Its free Redis keeps data on
+disk, allows 256 MB and 500K commands a month, and is archived (with a backup)
+only after 30 days with no activity. A search uses roughly 15–25 commands, so
+the default 200-searches-a-day cap stays well inside the free limit.
+
+1. Create a free account at <https://console.upstash.com> and create a Redis
+   database in the region nearest your server.
+2. Copy its **TCP** connection URL. It looks like
+   `rediss://default:<password>@<name>.upstash.io:6379` (note `rediss`, with
+   TLS). Not the REST URL.
+3. Set it as `ANGEL_REDIS_URL` (in `.env` locally, in the dashboard on Render)
+   and restart.
+4. Check `/health`: it should report `"state": {"backend": "redis",
+   "reachable": true}`.
+
+Any other Redis works the same way, including paid Render Key Value or a local
+one (`docker run -p 6379:6379 redis:7-alpine`, then
+`ANGEL_REDIS_URL=redis://localhost:6379/0`). Render's *free* Key Value doesn't
+keep data across its restarts, so it doesn't help here.
+
+**If Redis becomes unreachable**, the app logs a warning and keeps running on
+in-process state, exactly as if `ANGEL_REDIS_URL` were unset, until Redis is
+back. `/health` then shows `"reachable": false`.
+
+Geocoded venue coordinates expire after 30 days, because Google's Maps
+Platform terms limit how long Places content may be cached. Check the current
+terms before changing that.
 
 ---
 
@@ -173,8 +211,10 @@ match), so it gets the same versions CI tests, NLIP libraries included.
    other's, the hop count is wrong for your setup. The daily cap still
    protects you either way.
 
-The free tier sleeps when idle and wipes all in-memory state (cache,
-conversations, rate-limit counters, the daily count) each time it restarts.
+**Set `ANGEL_REDIS_URL`** (see [Shared state](#shared-state-redis)). The
+free tier sleeps when idle and restarts often. Without Redis, each restart
+wipes the cache, the conversations, and the rate-limit and daily counters,
+which means the daily spending cap resets too.
 
 ---
 

@@ -24,33 +24,28 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _clear_query_cache():
-    """Empty the process-wide caches and rate-limit counters around every test.
+def _fresh_state(monkeypatch):
+    """Give every test an empty in-memory store (see angel_filter/state.py).
 
-    CACHE is module-level state shared by both transports. Once the NLIP path
-    started caching, a test whose query matched an earlier test's key was served
-    the stored payload and never reached its orchestrator spy — the assertion
-    then failed on an empty kwargs dict, passing in isolation and failing in the
-    suite. Tests must not depend on execution order, so this resets it.
+    The query cache, conversations, rate-limit counters and geocode caches all
+    live in that store. Shared across tests, a query matching an earlier test's
+    key was served the stored payload and never reached its orchestrator spy,
+    and enough requests across the suite would trip the rate limit in an
+    unrelated test. Tests must not depend on execution order.
 
-    QueryCache exposes no public clear(); /cache/clear reaches into the same two
-    attributes, so this mirrors it rather than inventing an API.
+    ANGEL_REDIS_URL is cleared so a developer's real Redis is never touched.
+    With ANGEL_TEST_STORE=redis, every test runs on an in-process fake Redis
+    instead, so the whole app is exercised on the Redis backend (CI does both).
     """
-    from angel_filter.cache import CACHE
-    from angel_filter import geocode, limits
+    from angel_filter import state
 
-    def _reset():
-        CACHE._store.clear()
-        CACHE._history.clear()
-        # The venue-coordinate and locality caches are process-wide and
-        # deliberately outlive a query, so without this a test that geocodes
-        # "Joe's Pizza" makes the next one's lookup count zero.
-        geocode._coord_cache.clear()
-        geocode._locality_cache.clear()
-        # Rate-limit counters are per process too; without this, enough
-        # requests across the suite would trip the limit in an unrelated test.
-        limits.reset_limits()
+    monkeypatch.delenv("ANGEL_REDIS_URL", raising=False)
+    if os.getenv("ANGEL_TEST_STORE") == "redis":
+        import fakeredis
 
-    _reset()
+        client = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
+        state.use_store(state.RedisStore("redis://fake", client=client))
+    else:
+        state.use_store(state.MemoryStore())
     yield
-    _reset()
+    state.use_store(None)

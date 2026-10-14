@@ -23,6 +23,10 @@ services:
       # entry it adds. Verify after deploying (docs/SETUP.md, "Deploying").
       - key: ANGEL_TRUSTED_PROXY_HOPS
         value: "1"
+      # Redis for shared state (free: Upstash, see docs/SETUP.md). Without it,
+      # every restart resets the limits, including the daily cap.
+      - key: ANGEL_REDIS_URL
+        sync: false
 
       # Provider keys — set in the Render dashboard, never commit them.
       # OPENAI_API_KEY also provides embeddings, since Ollama can't run here.

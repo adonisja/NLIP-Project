@@ -83,26 +83,7 @@ today's providers it may rarely trigger. Ways in:
   affiliate links. Each rule needs a test for what it must *not* match, next
   to the existing ones in `tests/test_sponsorship.py`.
 
-## 3. All state is in memory
-
-The query cache, conversation memory, per-client rate limits, the daily query
-counter, and the venue geocode cache are module-level Python objects. As a
-result:
-
-- a restart (including Render's free tier waking from sleep) wipes all of it,
-  including the daily spending count
-- running more than one worker gives each worker its own limits and cache, so
-  the caps no longer hold
-
-The query cache also never deletes expired entries: a stale entry is only
-skipped when read, so memory grows until a restart (the daily cap bounds how
-fast).
-
-SQLite is enough for one instance; Redis if you scale out. The venue cache
-matters most for cost: it's what brings Places lookups down to nearly zero on
-repeat queries.
-
-## 5. Validate location input
+## 3. Validate location input
 
 `_extract_location` in `server.py` (NLIP) and the `lat`/`lng` fields of
 `POST /query` accept any number. NaN, infinity, and out-of-range coordinates
@@ -112,7 +93,7 @@ rejects them, failing that provider) and into distance math. Reject anything
 outside −90…90 / −180…180 or not finite, and treat it the same as no location.
 A good first issue: small, self-contained, easy to test.
 
-## 6. Say when nothing met the user's limits
+## 4. Say when nothing met the user's limits
 
 When every result breaks a hard limit (all over budget, say),
 `_apply_hard_constraints` in `ranker.py` returns all of them unfiltered, and
@@ -121,7 +102,7 @@ the reply should say "nothing met your budget, here are the closest". That
 means a flag on the response, a line in the NLIP text reply, and a notice in
 the UI.
 
-## 7. Smaller cleanups
+## 5. Smaller cleanups
 
 - **Brave returns pages, not places.** Brave's web search results have no
   price, rating, or coordinates, so they only compete on text similarity (and

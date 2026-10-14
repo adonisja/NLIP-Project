@@ -96,11 +96,12 @@ def test_query_route_returns_429_past_the_client_limit(spy):
     assert spy.calls == 2, "the rejected request still reached the providers"
 
 
-def test_rate_limited_requests_do_not_burn_the_daily_budget(spy):
+@pytest.mark.asyncio
+async def test_rate_limited_requests_do_not_burn_the_daily_budget(spy):
     with TestClient(server.app) as client:
         for i in range(5):
             client.post("/query", json={"query": f"lunch {i}"})
-    assert limits.daily_budget_status()["count"] == 2
+    assert (await limits.daily_budget_status())["count"] == 2
 
 
 def test_daily_cap_applies_across_clients(spy, monkeypatch):

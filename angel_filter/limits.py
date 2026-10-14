@@ -19,22 +19,21 @@ Layer 2 — daily global budget:
     is the credit-protection backstop, and the one that holds even when
     layer 1 is evaded.
 
-Both counters live in process memory, which is fine for a single
-instance. If you scale horizontally (multiple workers / containers),
-move them to Redis or each instance enforces its own quota independently.
+Both counters live in the shared store (state.py). With ANGEL_REDIS_URL set
+they are shared by every worker and instance and survive restarts; without
+it they are per-process and reset on restart.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import time
-from collections import deque
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
+
+from angel_filter.state import PREFIX, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -78,83 +77,69 @@ def client_key(request: Request) -> str:
 
 
 # --- Per-client sliding window ------------------------------------------------
-_client_hits: dict[str, deque[float]] = {}
-_client_lock = asyncio.Lock()
-
 
 async def _enforce_client_rate(key: str) -> None:
-    now = time.monotonic()
-    async with _client_lock:
-        hits = _client_hits.setdefault(key, deque())
-        # Drop timestamps that fell out of the window.
-        while hits and now - hits[0] >= USER_RATE_WINDOW:
-            hits.popleft()
-        if len(hits) >= USER_RATE_LIMIT:
-            retry_after = max(1, int(USER_RATE_WINDOW - (now - hits[0])) + 1)
-            logger.warning(
-                "Rate limit hit for client %r (%d/%ds)",
-                key, USER_RATE_LIMIT, USER_RATE_WINDOW,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=(
-                    f"Rate limit exceeded ({USER_RATE_LIMIT} requests per "
-                    f"{USER_RATE_WINDOW}s). Try again in {retry_after}s."
-                ),
-                headers={"Retry-After": str(retry_after)},
-            )
-        hits.append(now)
+    retry_after = await get_store().window_hit(
+        PREFIX + "rate:" + key, USER_RATE_WINDOW, USER_RATE_LIMIT,
+    )
+    if retry_after is None:
+        return
+    retry_after = int(retry_after) + 1
+    logger.warning(
+        "Rate limit hit for client %r (%d/%ds)",
+        key, USER_RATE_LIMIT, USER_RATE_WINDOW,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=(
+            f"Rate limit exceeded ({USER_RATE_LIMIT} requests per "
+            f"{USER_RATE_WINDOW}s). Try again in {retry_after}s."
+        ),
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 # --- Global daily budget ----------------------------------------------------
-_daily_count = 0
-_daily_date: str | None = None
-_daily_lock = asyncio.Lock()
+
+# A day's counter outlives the day by a margin, then expires on its own.
+_DAILY_KEY_TTL = 2 * 24 * 60 * 60
 
 
 def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _daily_key(day: str) -> str:
+    return PREFIX + "daily:" + day
+
+
 async def _enforce_daily_budget() -> None:
-    global _daily_count, _daily_date
-    async with _daily_lock:
-        today = _today_utc()
-        if _daily_date != today:
-            _daily_date = today
-            _daily_count = 0
-            logger.info("Daily budget counter reset for %s", today)
-        if _daily_count >= DAILY_QUERY_LIMIT:
-            logger.warning(
-                "Daily query budget exhausted: %d/%d",
-                _daily_count, DAILY_QUERY_LIMIT,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=(
-                    f"Daily query budget exhausted ({DAILY_QUERY_LIMIT}). "
-                    f"Resets at 00:00 UTC."
-                ),
-                headers={"Retry-After": "3600"},
-            )
-        _daily_count += 1
+    store = get_store()
+    key = _daily_key(_today_utc())
+    # Increment first and undo on rejection: with several workers, a separate
+    # read-then-write would let two of them both take the last slot.
+    count = await store.increment(key, 1, _DAILY_KEY_TTL)
+    if count > DAILY_QUERY_LIMIT:
+        await store.increment(key, -1, _DAILY_KEY_TTL)
+        logger.warning("Daily query budget exhausted: %d/%d", count - 1, DAILY_QUERY_LIMIT)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Daily query budget exhausted ({DAILY_QUERY_LIMIT}). "
+                f"Resets at 00:00 UTC."
+            ),
+            headers={"Retry-After": "3600"},
+        )
 
 
-def daily_budget_status() -> dict[str, int | str | None]:
-    """Read-only view of the global counter — useful for /health."""
+async def daily_budget_status() -> dict[str, int | str]:
+    """Read-only view of today's counter."""
+    day = _today_utc()
     return {
-        "date": _daily_date,
-        "count": _daily_count,
+        "date": day,
+        "count": int(await get_store().get(_daily_key(day)) or 0),
         "limit": DAILY_QUERY_LIMIT,
     }
-
-
-def reset_limits() -> None:
-    """Clear both counters. For tests; the server never calls this."""
-    global _daily_count, _daily_date
-    _client_hits.clear()
-    _daily_count = 0
-    _daily_date = None
 
 
 # --- Enforcement ----------------------------------------------------------------

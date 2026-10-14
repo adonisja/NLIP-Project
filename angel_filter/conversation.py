@@ -8,7 +8,8 @@ submessage — but nothing was stored against it, so every turn started cold.
 
 A new session object is constructed per request (see nlip_server's route: it
 calls `create_session()` on every call), so memory cannot live on the session
-instance. It lives here, keyed by token, and is pruned by age.
+instance. It lives in the shared store (state.py), keyed by token, and expires
+TURN_TTL_SECONDS after the conversation's last turn.
 
 Two ways a follow-up gets resolved, in order:
 
@@ -23,11 +24,13 @@ Two ways a follow-up gets resolved, in order:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from angel_filter.constraints import QueryConstraints
+from angel_filter.state import PREFIX, get_store
 
 # How long a conversation stays resolvable. Long enough for a demo or a genuine
 # back-and-forth, short enough that abandoned tokens do not accumulate.
@@ -92,43 +95,62 @@ class Conversation:
         return self.turns[-1] if self.turns else None
 
 
-class ConversationStore:
-    """In-process conversation memory, keyed by NLIP conversation token.
+def _turn_to_dict(turn: Turn) -> dict:
+    c = turn.constraints
+    return {
+        **{k: v for k, v in asdict(turn).items() if k != "constraints"},
+        # Only the bounds a refinement adjusts. Location and prompt context
+        # are per-request and must not be replayed from a stored turn.
+        "constraints": {"budget": c.budget, "max_distance": c.max_distance, "min_rating": c.min_rating},
+    }
 
-    In-process deliberately: the query cache already works this way, a single
-    Render instance serves the demo, and a durable store would be the wrong
-    thing to add before the protocol shape has been reviewed. A restart loses
-    conversations, which degrades to every turn being a fresh search.
+
+def _turn_from_dict(d: dict) -> Turn:
+    return Turn(**{**d, "constraints": QueryConstraints(**d["constraints"])})
+
+
+class ConversationStore:
+    """Conversation memory in the shared store, keyed by NLIP conversation token.
+
+    Each conversation expires `ttl_seconds` after its latest turn. A restart
+    with the in-memory store loses conversations, which degrades to every turn
+    being a fresh search; with Redis they survive it.
     """
 
-    def __init__(self, ttl_seconds: int = TURN_TTL_SECONDS):
+    def __init__(self, ttl_seconds: int = TURN_TTL_SECONDS, store=None):
         self._ttl = ttl_seconds
-        self._store: dict[str, Conversation] = {}
+        self._store = store   # None: the process-wide store, looked up per call
 
-    def get(self, token: str | None) -> Conversation | None:
+    def _backend(self):
+        return self._store or get_store()
+
+    @staticmethod
+    def _key(token: str) -> str:
+        # The client chooses the token, so hash it: a key's length and
+        # characters stay bounded whatever is sent.
+        return PREFIX + "conv:" + hashlib.sha256(token.encode()).hexdigest()
+
+    async def get(self, token: str | None) -> Conversation | None:
         if not token:
             return None
-        self._prune()
-        return self._store.get(token)
+        data = await self._backend().get(self._key(token))
+        if not data:
+            return None
+        return Conversation(
+            turns=[_turn_from_dict(t) for t in data["turns"]],
+            last_seen=data["last_seen"],
+        )
 
-    def record(self, token: str | None, turn: Turn) -> None:
+    async def record(self, token: str | None, turn: Turn) -> None:
         if not token:
             return
-        self._prune()
-        self._store.setdefault(token, Conversation()).add(turn)
-
-    def _prune(self) -> None:
-        cutoff = time.time() - self._ttl
-        stale = [k for k, c in self._store.items() if c.last_seen < cutoff]
-        for k in stale:
-            del self._store[k]
-
-    def stats(self) -> dict[str, int]:
-        self._prune()
-        return {
-            "conversations": len(self._store),
-            "turns": sum(len(c.turns) for c in self._store.values()),
-        }
+        conversation = await self.get(token) or Conversation()
+        conversation.add(turn)
+        await self._backend().set(
+            self._key(token),
+            {"turns": [_turn_to_dict(t) for t in conversation.turns], "last_seen": conversation.last_seen},
+            ttl=self._ttl,
+        )
 
 
 CONVERSATIONS = ConversationStore()

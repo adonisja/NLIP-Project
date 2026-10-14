@@ -128,16 +128,6 @@ def test_query_model_accepts_priority_and_defaults_to_none():
 # Parser and cache-key tests both pass even if the handler drops the field on the
 # floor — which is precisely the bug being fixed. These drive the real endpoint.
 
-def _reset_cache(cache) -> None:
-    """Empty the shared query cache between tests.
-
-    QueryCache exposes no public clear(); the /cache/clear endpoint reaches into
-    the same two attributes, so this mirrors it rather than inventing an API.
-    """
-    cache._store.clear()
-    cache._history.clear()
-
-
 @pytest.fixture
 def rest_client(monkeypatch):
     """A TestClient with rate limits stubbed and the orchestrator spied.
@@ -164,14 +154,12 @@ def rest_client(monkeypatch):
             )
 
     monkeypatch.setattr(server, "ORCHESTRATOR", _Spy())
-    _reset_cache(server.CACHE)
     server.app.dependency_overrides[enforce_query_limits] = lambda: "tester"
     try:
         yield TestClient(server.app), seen
     finally:
         server.app.dependency_overrides.clear()
-        _reset_cache(server.CACHE)
-
+    
 
 @pytest.mark.parametrize("sent,expected", [
     ("price",    QueryIntent.PRICE),

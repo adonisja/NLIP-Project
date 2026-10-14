@@ -17,6 +17,7 @@ ollama = "^0.3.0"
 python-dotenv = "^1.0.1"
 prometheus-client = "^0.20.0"
 itsdangerous = "^2.2.0"
+redis = ">=5.0,<7"   # shared state when ANGEL_REDIS_URL is set (state.py)
 
 # NLIP libraries per Mentor D
 nlip-sdk = { git = "https://github.com/nlip-project/nlip_sdk.git", branch = "main" }
@@ -25,6 +26,7 @@ nlip-server = { git = "https://github.com/nlip-project/nlip_server.git", branch 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 pytest-asyncio = "^0.23.0"
+fakeredis = ">=2.20"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

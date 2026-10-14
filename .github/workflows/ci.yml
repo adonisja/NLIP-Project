@@ -27,6 +27,9 @@ jobs:
       - name: Run tests
         run: poetry run pytest -v
 
+      - name: Run tests on the Redis state backend (fakeredis)
+        run: ANGEL_TEST_STORE=redis poetry run pytest -q
+
       # requirements.txt is what deployments install. If it drifts from
       # poetry.lock, a deploy can come up without the NLIP libraries, and the
       # UI cannot search. Regenerate with the command in its header.

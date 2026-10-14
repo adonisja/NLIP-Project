@@ -39,10 +39,18 @@ None of that carries over when you clone.
 poetry run pytest
 ```
 
-Tests must not need the network, API keys, or Ollama. Use `MockProvider` or
-canned responses, and set `ranker._ollama_available = False` for
-deterministic ranking. `tests/conftest.py` already sets `OLLAMA_MODEL` so the
-server module can be imported, and clears the shared caches between tests.
+Tests must not need the network, API keys, Ollama, or Redis. Use
+`MockProvider` or canned responses, and set `ranker._ollama_available = False`
+for deterministic ranking. `tests/conftest.py` already sets `OLLAMA_MODEL` so
+the server module can be imported, and gives every test a fresh, empty state
+store.
+
+To run the suite on the Redis backend too, as CI does (it uses fakeredis, so
+no Redis server is needed):
+
+```bash
+ANGEL_TEST_STORE=redis poetry run pytest
+```
 
 Any bug fix should come with a test that fails without the fix.
 

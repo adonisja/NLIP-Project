@@ -20,10 +20,12 @@ is a no-op and the pipeline behaves exactly as it did before.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 
 from angel_filter.providers.base import ProviderResult
+from angel_filter.state import PREFIX, get_store
 from angel_filter.providers.google_places import haversine_miles
 
 logger = logging.getLogger(__name__)
@@ -68,21 +70,37 @@ def _max_lookups() -> int:
         return 15
 
 
-# Venue name -> coordinates, retained for the life of the process. Venue names
-# repeat heavily across queries and across users ("Joe's Pizza" is in almost
-# every Manhattan lunch result), so without this the same handful of places is
-# re-geocoded on every run. A None value is cached too: a name that resolved to
+# Venue name -> coordinates, in the shared store (state.py). Venue names repeat
+# heavily across queries and across users ("Joe's Pizza" is in almost every
+# Manhattan lunch result), so without this the same handful of places is
+# re-geocoded on every run. "No match" is cached too: a name that resolved to
 # nothing, or to an unrelated place, should not be retried on the next query.
-_coord_cache: dict[str, tuple[float, float] | None] = {}
+#
+# Keyed by the user's rough area as well as the title: the lookup is biased
+# towards the user, so "Joe's Pizza" near Manhattan and near LA are different
+# places, and sharing one answer would give a wildly wrong distance.
+#
+# Entries expire after 30 days. Google's Maps Platform terms limit how long
+# Places content such as coordinates may be cached (30 days at the time of
+# writing); check the current terms before raising this.
+_GEOCODE_TTL = 30 * 24 * 60 * 60
+_VENUE_PREFIX = PREFIX + "venue:"
+_LOCALITY_PREFIX = PREFIX + "locality:"
 
 
-def geocode_cache_stats() -> dict[str, int]:
-    """Size of the process-wide venue cache, for /health and debugging."""
-    resolved = sum(1 for v in _coord_cache.values() if v is not None)
+def _venue_key(title: str, lat: float, lng: float) -> str:
+    # 0.1 degree is roughly 11 km: the same neighbourhood shares answers.
+    area = f"{round(lat, 1)},{round(lng, 1)}"
+    digest = hashlib.sha1(title.strip().lower().encode()).hexdigest()
+    return f"{_VENUE_PREFIX}{area}:{digest}"
+
+
+async def geocode_cache_stats() -> dict[str, int]:
+    """How many venue and locality answers are cached, for debugging."""
+    store = get_store()
     return {
-        "venues_cached": len(_coord_cache),
-        "venues_resolved": resolved,
-        "venues_unresolvable": len(_coord_cache) - resolved,
+        "venues_cached": await store.count_prefix(_VENUE_PREFIX),
+        "localities_cached": await store.count_prefix(_LOCALITY_PREFIX),
     }
 
 # Skip titles that clearly are not venues. A web-search result like "The 10
@@ -155,10 +173,9 @@ def _names_agree(asked: str, matched: str) -> bool:
 
 _NEARBY_URL = "https://places.googleapis.com/v1/places:searchNearby"
 
-# Cache resolved localities: a user's coordinates barely move between queries,
-# and the answer ("Manhattan, NY") is stable. Keyed on coordinates rounded to
-# ~110m, the same precision the query cache uses.
-_locality_cache: dict[tuple[float, float], str | None] = {}
+# Resolved localities are cached in the store too: a user's coordinates barely
+# move between queries, and the answer ("Manhattan, NY") is stable. Keyed on
+# coordinates rounded to ~110m, the same precision the query cache uses.
 
 
 def _locality_from_address(address: str) -> str | None:
@@ -205,9 +222,11 @@ async def describe_location(
     if not api_key or lat is None or lng is None:
         return None
 
-    key = (round(lat, 3), round(lng, 3))
-    if key in _locality_cache:
-        return _locality_cache[key]
+    store = get_store()
+    key = f"{_LOCALITY_PREFIX}{round(lat, 3)},{round(lng, 3)}"
+    cached = await store.get(key)
+    if cached is not None:   # stored as {"locality": ... or None}
+        return cached["locality"]
 
     import httpx
 
@@ -234,12 +253,12 @@ async def describe_location(
             data = resp.json()
     except Exception as exc:
         logger.debug("Reverse lookup failed for (%s, %s): %s", lat, lng, exc)
-        _locality_cache[key] = None
+        await store.set(key, {"locality": None}, ttl=_GEOCODE_TTL)
         return None
 
     places = data.get("places") or []
     locality = _locality_from_address(places[0].get("formattedAddress", "")) if places else None
-    _locality_cache[key] = locality
+    await store.set(key, {"locality": locality}, ttl=_GEOCODE_TTL)
     if locality:
         logger.info("User location resolved to %r", locality)
     return locality
@@ -403,7 +422,17 @@ async def enrich_distances(
     # Serve anything already known from a previous query before spending a call.
     # A cached None counts as known — a name that resolved to nothing, or to an
     # unrelated place, should not be retried every time it appears.
-    to_fetch = [t for t in by_title if t not in _coord_cache]
+    store = get_store()
+    titles = list(by_title)
+    keys = {t: _venue_key(t, user_lat, user_lng) for t in titles}
+    # Stored as {"coords": [lat, lng]} or {"coords": None} for "no match", so
+    # a missing entry (None) is distinguishable from a cached miss.
+    known = {
+        t: entry["coords"]
+        for t, entry in zip(titles, await store.get_many([keys[t] for t in titles]))
+        if entry is not None
+    }
+    to_fetch = [t for t in titles if t not in known]
 
     # Backstop against a pathological run. Titles past the ceiling keep
     # distance=None, which the ranker treats as honestly unscored.
@@ -438,11 +467,14 @@ async def enrich_distances(
             if isinstance(item, BaseException) or item is None:
                 continue
             title, coords = item
-            _coord_cache[title] = coords
+            known[title] = coords
+            await store.set(
+                keys[title], {"coords": list(coords) if coords else None}, ttl=_GEOCODE_TTL,
+            )
 
     # Everything now answerable from the cache; titles skipped by the ceiling
     # are simply absent and stay unscored.
-    pairs = [(t, _coord_cache[t]) for t in by_title if t in _coord_cache]
+    pairs = [(t, known[t]) for t in titles if t in known]
 
     enriched = 0
     for title, coords in pairs:

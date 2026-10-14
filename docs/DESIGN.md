@@ -339,7 +339,27 @@ go through these limits. `tests/test_limits.py` covers both routes.
 
 ### State
 
-The query cache, conversation memory, rate limiter, daily counter, and venue
-coordinate cache are all plain in-memory Python objects. That's fine for one
-process and a demo. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for what it means
-beyond that.
+The query cache, conversation memory, rate limiter, daily counter, and the
+venue and locality geocode caches all go through one async store,
+[state.py](../angel_filter/state.py). It's in-process memory by default and
+Redis when `ANGEL_REDIS_URL` is set. Every entry has an expiry, so nothing
+grows forever: cache entries 3 hours, conversations 30 minutes after their
+last turn, a day's counter 2 days, geocodes 30 days.
+
+- **The rate limit and daily cap are safe across workers.** The rate limit adds
+  the hit and counts in one Redis transaction, and the daily cap increments
+  first and undoes a rejected request, so two workers can't both take the
+  last slot.
+- **A Redis outage never fails a search.** Each operation falls back to an
+  in-process store, which is the old behaviour, and `/health` reports
+  `"reachable": false`.
+- **Venue coordinates are keyed by the user's rough area as well as the
+  title.** The lookup is biased towards the user, so "Joe's Pizza" near
+  Manhattan and near LA are different places, and a shared cache must not mix
+  them up.
+- **Conversation tokens are hashed before becoming keys**, because the client
+  chooses them.
+
+**Before you change this:** tests run on both backends. CI runs the suite a
+second time with `ANGEL_TEST_STORE=redis`, which uses an in-process fake
+Redis, and `tests/test_state.py` holds the two backends to the same behaviour.

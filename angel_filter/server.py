@@ -37,6 +37,7 @@ from angel_filter.limits import enforce_query_limits, nlip_limit_middleware
 from angel_filter.constraints import QueryConstraints
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.ranker import QueryIntent
+from angel_filter.state import get_store
 from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
 logger = logging.getLogger(__name__)
@@ -157,13 +158,19 @@ def _constraints_from_payload(payload: dict) -> QueryConstraints:
     )
 
 
-def _health_response(mode: str, nlip_available: bool) -> dict:
+async def _health_response(mode: str, nlip_available: bool) -> dict:
+    store = get_store()
+    state = {"backend": store.backend}
+    if store.backend == "redis":
+        # False means state is running on the in-process fallback right now.
+        state["reachable"] = await store.ping()
     return {
         "ok": True,
         "mode": mode,
         "nlip_available": nlip_available,
         "uptime_seconds": round(time.time() - _START_TIME, 1),
         "providers": [p.name for p in ORCHESTRATOR.providers],
+        "state": state,
     }
 
 
@@ -197,7 +204,7 @@ async def _rest_search(body) -> dict:
     # Fold location into the cache's preference component so two users at
     # different coordinates don't get served each other's distance results.
     cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
-    cached = CACHE.get(body.query, cache_pref)
+    cached = await CACHE.get(body.query, cache_pref)
     if cached:
         logger.info("Cache hit for query: %r", body.query)
         return cached
@@ -218,7 +225,7 @@ async def _rest_search(body) -> dict:
         )
 
     payload = {**_serialize_response(response), "cached": False}
-    CACHE.set(body.query, cache_pref, {**payload, "cached": True})
+    await CACHE.set(body.query, cache_pref, {**payload, "cached": True})
     return payload
 
 
@@ -282,7 +289,7 @@ if _NLIP_AVAILABLE:
             # object per request — so it is keyed by that token in CONVERSATIONS.
             token = msg.extract_conversation_token()
             turn_mode = _extract_turn_mode(msg)
-            conversation = CONVERSATIONS.get(token)
+            conversation = await CONVERSATIONS.get(token)
             previous = conversation.latest if conversation else None
 
             # An explicit "new" ends the thread outright: the user told us this
@@ -342,7 +349,7 @@ if _NLIP_AVAILABLE:
             if context_prefix:
                 cache_pref = f"{cache_pref}|ctx={context_prefix}"
 
-            payload = CACHE.get(search_query, cache_pref)
+            payload = await CACHE.get(search_query, cache_pref)
             if payload is None:
                 response = await _run_search(
                     user_query=search_query,
@@ -354,7 +361,7 @@ if _NLIP_AVAILABLE:
                     context_prefix=context_prefix,
                 )
                 payload = _serialize_response(response)
-                CACHE.set(search_query, cache_pref, {**payload, "cached": True})
+                await CACHE.set(search_query, cache_pref, {**payload, "cached": True})
                 summary = _format_reply(response)
             else:
                 logger.info("Cache hit for NLIP query: %r", search_query)
@@ -368,7 +375,7 @@ if _NLIP_AVAILABLE:
             # Remember this turn so the *next* follow-up has an anchor. The top
             # result's actual values are what "cheaper than that" refers to.
             top = (payload.get("results") or [None])[0]
-            CONVERSATIONS.record(token, Turn(
+            await CONVERSATIONS.record(token, Turn(
                 query=search_query,
                 constraints=refinement or _constraints_from_payload(payload),
                 top_title=top.get("title") if top else None,
@@ -447,7 +454,7 @@ if _NLIP_AVAILABLE:
 
     @app.get("/health")
     async def health():
-        return _health_response(mode="nlip", nlip_available=True)
+        return await _health_response(mode="nlip", nlip_available=True)
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
@@ -459,12 +466,11 @@ if _NLIP_AVAILABLE:
     # in docs/KNOWN_ISSUES.md.
     @app.get("/history")
     async def history():
-        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+        return {"queries": await CACHE.history(), "cache_stats": await CACHE.stats()}
 
     @app.post("/cache/clear")
     async def cache_clear():
-        CACHE._store.clear()
-        CACHE._history.clear()
+        await CACHE.clear()
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
@@ -511,7 +517,7 @@ else:
 
     @app.get("/health")
     async def health():
-        return _health_response(mode="fallback", nlip_available=False)
+        return await _health_response(mode="fallback", nlip_available=False)
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
@@ -519,12 +525,11 @@ else:
 
     @app.get("/history")
     async def history():
-        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+        return {"queries": await CACHE.history(), "cache_stats": await CACHE.stats()}
 
     @app.post("/cache/clear")
     async def cache_clear():
-        CACHE._store.clear()
-        CACHE._history.clear()
+        await CACHE.clear()
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
