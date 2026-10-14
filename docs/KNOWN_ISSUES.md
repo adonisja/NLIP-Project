@@ -12,18 +12,6 @@ team.
 
 # Bugs being fixed before handoff
 
-## B3. An embedding failure fails the whole search
-
-The ranker checks once whether Ollama or OpenAI embeddings are available and
-keeps that answer forever. If the backend fails afterwards, `rank()` raises
-and the whole search fails, after the providers have already been paid for.
-This keeps happening on every search until a restart. On Render, an OpenAI
-rate-limit error on the embeddings call would do the same. The Ollama client
-is also created with no timeout, so a stalled Ollama hangs every search.
-
-**Fix:** if embedding fails, fall back to keyword scoring for that search and
-check the backend again next time. Give the Ollama client a timeout.
-
 ## B4. `/metrics` doesn't count searches made through `/nlip/`
 
 The query counter, latency histogram, and sponsored-penalty counter are only

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -114,12 +115,26 @@ class RankedResult:
 
 OPENAI_EMBED_MODEL = "text-embedding-3-small"
 
+# The ollama client's default is no timeout at all, so a stalled Ollama would
+# hang every search indefinitely.
+OLLAMA_EMBED_TIMEOUT = 30.0
+
+# How long a failed availability probe is trusted before probing again, so a
+# backend that comes up after the server does is picked up without a restart.
+BACKEND_RECHECK_SECONDS = 60.0
+
 
 class Ranker:
     def __init__(self, embed_model: str = DEFAULT_EMBED_MODEL):
         self.embed_model = embed_model
+        # True / False / None (unknown). Tests set these directly to pin a
+        # backend; a value set that way is never re-probed (see _known).
         self._ollama_available: bool | None = None
         self._openai_available: bool | None = None
+        # When the probe that produced a False ran; None means it was set by
+        # hand, not probed.
+        self._ollama_checked_at: float | None = None
+        self._openai_checked_at: float | None = None
         self._ollama_client = None  # lazily-created ollama.AsyncClient
 
     def _ollama(self):
@@ -133,7 +148,7 @@ class Ranker:
         """
         if self._ollama_client is None:
             import ollama
-            self._ollama_client = ollama.AsyncClient()
+            self._ollama_client = ollama.AsyncClient(timeout=OLLAMA_EMBED_TIMEOUT)
         return self._ollama_client
 
     async def rank(
@@ -153,24 +168,42 @@ class Ranker:
         if not results:
             return []
 
+        scored: list[RankedResult] | None = None
+        backend = None
         if await self._has_ollama():
-            logger.info("Embedding backend: Ollama (%s)", self.embed_model)
-            embeddings = await self._embed_all_ollama(results)
-            consensus  = _build_fuzzy_consensus(results, embeddings, FUZZY_THRESHOLD)
-            scored     = await self._score_with_embeddings(
-                user_preference, results, intent, constraints, consensus,
-                embeddings, backend="ollama",
-            )
+            backend = "ollama"
         elif await self._has_openai():
-            logger.info("Embedding backend: OpenAI (%s)", OPENAI_EMBED_MODEL)
-            embeddings = await self._embed_all_openai(results)
-            consensus  = _build_fuzzy_consensus(results, embeddings, FUZZY_THRESHOLD)
-            scored     = await self._score_with_embeddings(
-                user_preference, results, intent, constraints, consensus,
-                embeddings, backend="openai",
+            backend = "openai"
+
+        if backend is not None:
+            logger.info(
+                "Embedding backend: %s (%s)", backend,
+                self.embed_model if backend == "ollama" else OPENAI_EMBED_MODEL,
             )
-        else:
-            logger.warning("No embedding backend available — using keyword-overlap fallback.")
+            try:
+                embed_all = (
+                    self._embed_all_ollama if backend == "ollama" else self._embed_all_openai
+                )
+                embeddings = await embed_all(results)
+                consensus  = _build_fuzzy_consensus(results, embeddings, FUZZY_THRESHOLD)
+                scored     = await self._score_with_embeddings(
+                    user_preference, results, intent, constraints, consensus,
+                    embeddings, backend=backend,
+                )
+            except Exception as exc:
+                # The providers have already been paid for by now, so a
+                # backend that went away since the probe must cost this search
+                # some quality, never the whole answer. Forget the probe so the
+                # next search checks again instead of trusting a stale True.
+                logger.warning(
+                    "Embedding via %s failed (%s); keyword scoring for this search.",
+                    backend, exc,
+                )
+                self._forget_backend(backend)
+
+        if scored is None:
+            if backend is None:
+                logger.warning("No embedding backend available — using keyword-overlap fallback.")
             consensus = _build_token_consensus(results)
             scored    = _score_with_keywords(
                 user_preference, results, intent, constraints, consensus
@@ -182,8 +215,28 @@ class Ranker:
 
     # -- private ---------------------------------------------------------------
 
+    @staticmethod
+    def _known(available: bool | None, checked_at: float | None) -> bool:
+        """Can a stored availability answer be used without probing again?
+
+        True is kept until a real call fails (see _forget_backend). False from
+        a probe expires after BACKEND_RECHECK_SECONDS. False set by hand
+        (checked_at None) never expires, which is how tests pin keyword mode.
+        """
+        if available is None:
+            return False
+        if available or checked_at is None:
+            return True
+        return time.monotonic() - checked_at < BACKEND_RECHECK_SECONDS
+
+    def _forget_backend(self, backend: str) -> None:
+        if backend == "ollama":
+            self._ollama_available = None
+        else:
+            self._openai_available = None
+
     async def _has_ollama(self) -> bool:
-        if self._ollama_available is not None:
+        if self._known(self._ollama_available, self._ollama_checked_at):
             return self._ollama_available
         try:
             await self._ollama().embeddings(model=self.embed_model, prompt="ping")
@@ -191,14 +244,16 @@ class Ranker:
         except Exception as exc:
             logger.info("Ollama probe failed: %s", exc)
             self._ollama_available = False
+        self._ollama_checked_at = time.monotonic()
         return self._ollama_available
 
     async def _has_openai(self) -> bool:
-        if self._openai_available is not None:
+        if self._known(self._openai_available, self._openai_checked_at):
             return self._openai_available
         import os
         if not os.getenv("OPENAI_API_KEY"):
             self._openai_available = False
+            self._openai_checked_at = time.monotonic()
             return False
         try:
             await self._openai_embed("ping")
@@ -206,6 +261,7 @@ class Ranker:
         except Exception as exc:
             logger.info("OpenAI embedding probe failed: %s", exc)
             self._openai_available = False
+        self._openai_checked_at = time.monotonic()
         return self._openai_available
 
     async def _openai_embed(self, text: str) -> list[float]:
