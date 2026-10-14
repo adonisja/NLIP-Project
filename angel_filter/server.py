@@ -280,6 +280,12 @@ if _NLIP_AVAILABLE:
             )
             if refinement is not None:
                 cache_pref = f"{cache_pref}|r={refinement.budget},{refinement.max_distance},{refinement.min_rating}"
+            # Likewise a follow-up answered with prior turns in the prompt: "what
+            # about vegetarian options" means something different in every
+            # conversation. Without this, one conversation's answer was served
+            # to another that shared the same wording and location.
+            if context_prefix:
+                cache_pref = f"{cache_pref}|ctx={context_prefix}"
 
             payload = CACHE.get(search_query, cache_pref)
             if payload is None:

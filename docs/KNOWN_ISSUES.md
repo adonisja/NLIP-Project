@@ -12,18 +12,6 @@ team.
 
 # Bugs being fixed before handoff
 
-## B2. A vague follow-up can be served another conversation's answer
-
-Follow-ups the refinement parser doesn't recognise ("what about vegetarian
-options") are sent to the providers with the conversation's earlier turns
-prepended. The query cache key leaves that context out. In a test, a taco
-conversation's follow-up was answered from a sushi conversation's cached
-result, and the providers were never called. The UI's location presets make
-this likely, since everyone on a preset shares coordinates and so shares a
-cache key.
-
-**Fix:** include the context in the cache key.
-
 ## B3. An embedding failure fails the whole search
 
 The ranker checks once whether Ollama or OpenAI embeddings are available and

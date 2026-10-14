@@ -440,3 +440,36 @@ async def test_continue_without_a_recognised_delta_sends_context(spy_session):
 
     assert spy.calls[1]["override_constraints"] is None
     assert "lunch under $20" in spy.calls[1]["context_prefix"]
+
+
+@pytest.mark.asyncio
+async def test_a_contextual_follow_up_is_not_served_another_conversations_answer(spy_session):
+    """The same vague follow-up in two conversations must reach the providers twice.
+
+    The context prepended to the prompt is what makes the answer conversation-
+    specific. It was not in the cache key, so conversation B's "what about
+    vegetarian options" was answered from conversation A's sushi results.
+    """
+    session, spy = spy_session
+
+    await session.execute(_msg("sushi in brooklyn", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options", token="conv-a"))
+    await session.execute(_msg("tacos in queens", token="conv-b"))
+    await session.execute(_msg("what about vegetarian options", token="conv-b"))
+
+    follow_ups = [c for c in spy.calls if c["query"] == "what about vegetarian options"]
+    assert len(follow_ups) == 2, "conversation B was served conversation A's cached answer"
+    assert "tacos in queens" in follow_ups[1]["context_prefix"]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_search_is_not_served_a_contextual_answer(spy_session):
+    """The reverse: a cached follow-up must not answer the same words asked cold."""
+    session, spy = spy_session
+
+    await session.execute(_msg("sushi in brooklyn", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options"))   # no conversation
+
+    assert len(spy.calls) == 3
+    assert spy.calls[2]["context_prefix"] == ""
