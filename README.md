@@ -23,7 +23,10 @@ May 15, 2026. It is now being handed to new students to carry forward.
   GitHub [@adonisja](https://github.com/adonisja). Wrote much of the current
   code. Ask about design history or why something is the way it is.
 - **What works:** the full pipeline end to end: six live providers, ranking,
-  real distances, multi-turn follow-ups, and the demo UI.
+  real distances, sponsored-result detection, multi-turn follow-ups, and the
+  demo UI. State (cache, conversations, rate limits, the daily cap) persists
+  in Postgres when a database is configured; Supabase's free tier is the
+  documented option.
 - **There is no login.** The original GitHub login was removed so you can
   design your own. That's the first starter task in
   [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md). Until then, anyone who can
@@ -34,9 +37,10 @@ May 15, 2026. It is now being handed to new students to carry forward.
   ([sponsorship.py](angel_filter/sponsorship.py)), and nobody has yet measured
   how often they fire on real searches.
 
-You will be running your **own copy**: your own repository, API keys, and
-deployment. Nothing from the original team's accounts carries
-over.
+You will be running your **own copy**: your own repository, API keys,
+database and deployment. Nothing from the original team's accounts carries
+over. **Start with [docs/HANDOFF.md](docs/HANDOFF.md)**, a checklist that
+takes you from an empty account to a working deployment.
 
 ---
 
@@ -61,6 +65,8 @@ over.
     │  rate limit + daily cap ─── limits.py          │
     │    (per client IP; no login)                   │
     │  query cache (3h TTL) ───── cache.py           │
+    │    all three persist via state.py: in memory,  │
+    │    or Postgres (Supabase) if configured        │
     └───────────────────┬────────────────────────────┘
                         │  cache miss
                         ▼
@@ -83,6 +89,13 @@ over.
        ┌───────────┴────────────────────────────────────┘
        │  ProviderResult[]  (normalized at this boundary)
        ▼
+    ┌────────────────────────────────────────────────┐
+    │  Sponsored detection                           │  sponsorship.py
+    │   ad-network links, ad-click IDs, affiliate    │
+    │   tags, "Sponsored" disclosures → flagged,     │
+    │   with the reason recorded                     │
+    └───────────────────┬────────────────────────────┘
+                        ▼
     ┌────────────────────────────────────────────────┐
     │  Distance enrichment                           │  geocode.py
     │   geocode venues that have no distance and     │
@@ -170,6 +183,20 @@ If `mode` says `"fallback"`, the NLIP libraries didn't install, and the UI
 can't search. See
 [docs/SETUP.md](docs/SETUP.md#troubleshooting).
 
+**Optional: a database.** Without one, state lives in memory and resets when
+the server restarts, which is fine for local work. To keep it, create a free
+Supabase project and follow
+[docs/SETUP.md → Shared state](docs/SETUP.md#shared-state-supabase). The
+short version is to add its Session pooler URL to `.env` as
+`ANGEL_DATABASE_URL`, then run:
+
+```bash
+poetry run python scripts/check_database.py --set-password   # hidden prompt, tests the connection
+```
+
+Restart the server; `/health` should show `"state": {"backend": "postgres",
+"reachable": true}`.
+
 ---
 
 ## Where to start reading
@@ -215,8 +242,11 @@ static/
 supabase/
   config.toml           Supabase CLI config (local only; production ignores it)
   migrations/           schema, applied by Supabase's GitHub integration on merge
+scripts/
+  check_database.py     diagnose the database connection; set its password safely
 tests/                  pytest suite, fully offline
 docs/
+  HANDOFF.md            start here: the takeover checklist
   SETUP.md              full setup, all providers, deployment, troubleshooting
   DESIGN.md             how scoring works and why
   KNOWN_ISSUES.md       unfinished work, written as starter tasks
@@ -243,6 +273,9 @@ CLAUDE.md               instructions for Claude Code, if you use it
 | **Conversation token** | NLIP's ID for a conversation. We store turns against it so "cheaper than that" works. |
 | **Turn mode** | The client's choice: `continue` a conversation or start a `new` one. |
 | **Fallback mode** | Plain FastAPI `POST /query`, used when the NLIP libraries can't be imported. |
+| **Sponsored detection** | Rules in `sponsorship.py` that flag paid placements (ad links, affiliate tags, disclosures). Each flag records a `sponsored_reason`. |
+| **State store** | Where the cache, conversations and limits live (`state.py`): process memory, or Postgres when `ANGEL_DATABASE_URL` is set. |
+| **Session pooler** | Supabase's IPv4 connection endpoint. Use it instead of the Direct connection, which needs IPv6. |
 
 ---
 

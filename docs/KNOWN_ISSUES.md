@@ -42,6 +42,14 @@ short design doc, then review them with your mentor before writing code):
    query history, and conversation tokens. Today any caller who learns a
    conversation token can continue that conversation.
 
+**A ready-made option:** the project now has a Supabase database, and
+Supabase includes an auth service (email, magic links, GitHub and Google
+sign-in) on the free tier. That could save building sessions and password
+storage yourselves. Weigh it against the questions above, especially the one
+about agent clients, and keep any user tables out of the `public` schema
+unless they're meant to be served by Supabase's Data API (see CONTRIBUTING,
+"Changing the database schema").
+
 **Things to know before building:**
 - `nlip_server` registers `/nlip/` itself, so you can't add a FastAPI
   dependency to it. `nlip_limit_middleware` in `limits.py` shows the pattern
