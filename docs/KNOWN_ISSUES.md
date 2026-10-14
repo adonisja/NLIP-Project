@@ -103,14 +103,6 @@ SQLite is enough for one instance; Redis if you scale out. The venue cache
 matters most for cost: it's what brings Places lookups down to nearly zero on
 repeat queries.
 
-## 4. The ranker's Ollama client ignores `OLLAMA_URL`
-
-The Ollama *provider* reads `OLLAMA_URL`, but the *ranker's* embedding client
-(`Ranker._ollama` in `ranker.py`) creates `ollama.AsyncClient` with no host,
-so embeddings always go to `localhost:11434` (or the `ollama` library's own
-`OLLAMA_HOST` variable). Pass the configured URL through so a remote Ollama
-works for both.
-
 ## 5. Validate location input
 
 `_extract_location` in `server.py` (NLIP) and the `lat`/`lng` fields of

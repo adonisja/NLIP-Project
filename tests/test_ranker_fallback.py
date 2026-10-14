@@ -112,3 +112,17 @@ def test_the_ollama_client_has_a_timeout():
     client = Ranker()._ollama()
     timeout = client._client.timeout
     assert timeout.read is not None and timeout.read <= ranker_mod.OLLAMA_EMBED_TIMEOUT
+
+
+def test_the_ollama_client_uses_ollama_url(monkeypatch):
+    """The provider always honoured OLLAMA_URL; the ranker's embeddings didn't."""
+    pytest.importorskip("ollama")
+    monkeypatch.setenv("OLLAMA_URL", "http://gpu-box:11434")
+    assert str(Ranker()._ollama()._client.base_url).startswith("http://gpu-box:11434")
+
+
+def test_without_ollama_url_the_client_uses_the_local_default(monkeypatch):
+    pytest.importorskip("ollama")
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert "11434" in str(Ranker()._ollama()._client.base_url)

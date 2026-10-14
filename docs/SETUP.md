@@ -87,8 +87,8 @@ The ranker compares text using embeddings, and tries these in order:
 2. **OpenAI `text-embedding-3-small`**, if `OPENAI_API_KEY` is set.
 3. **Keyword overlap**, which always works but scores noticeably worse.
 
-The ranker's Ollama client connects to the default local address. It does
-**not** read `OLLAMA_URL` (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
+Both the ranker and the Ollama provider use `OLLAMA_URL`, so a remote Ollama
+serves embeddings and generation alike.
 
 ### Authentication
 

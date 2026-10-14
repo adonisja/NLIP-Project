@@ -148,7 +148,12 @@ class Ranker:
         """
         if self._ollama_client is None:
             import ollama
-            self._ollama_client = ollama.AsyncClient(timeout=OLLAMA_EMBED_TIMEOUT)
+            import os
+            # Same server the Ollama provider uses. None lets the library fall
+            # back to OLLAMA_HOST, then localhost:11434.
+            self._ollama_client = ollama.AsyncClient(
+                host=os.getenv("OLLAMA_URL") or None, timeout=OLLAMA_EMBED_TIMEOUT,
+            )
         return self._ollama_client
 
     async def rank(
