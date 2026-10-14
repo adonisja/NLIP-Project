@@ -7,12 +7,16 @@ all of them in parallel and normalize their responses.
 
 from __future__ import annotations
 
+import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from angel_filter.constraints import QueryConstraints
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,6 +38,32 @@ class ProviderResult:
     rating: float | None = None              # P3 — star rating 0-5
     sponsored: bool | None = None            # True if the provider flagged it as an ad
     raw: dict[str, Any] = field(default_factory=dict)  # the untouched original payload
+
+    def __post_init__(self) -> None:
+        # The axis values feed the ranker's 0-1 scores, and the AI providers
+        # parse them out of free-form model output: "92%" becomes a rating of
+        # 92, which once scored 18.4 on an axis meant to top out at 1. A value
+        # outside its real range is not data, so it is treated exactly like a
+        # value the provider never gave. Checked here, at the boundary every
+        # provider passes through, so a new provider cannot forget it.
+        self.price = _in_range(self.price, 0.0, None, "price", self.title)
+        self.distance = _in_range(self.distance, 0.0, None, "distance", self.title)
+        self.rating = _in_range(self.rating, 0.0, 5.0, "rating", self.title)
+
+
+def _in_range(
+    value: float | None, low: float, high: float | None, name: str, title: str,
+) -> float | None:
+    """`value` if it is a finite number within [low, high], otherwise None."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        logger.info("Dropping non-numeric %s %r for %r", name, value, title)
+        return None
+    if not math.isfinite(value) or value < low or (high is not None and value > high):
+        logger.info("Dropping out-of-range %s %r for %r", name, value, title)
+        return None
+    return float(value)
 
 
 class BaseProvider(ABC):

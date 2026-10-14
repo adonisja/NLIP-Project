@@ -12,18 +12,6 @@ team.
 
 # Bugs being fixed before handoff
 
-## B1. Out-of-range ratings and prices break scoring
-
-Ratings and prices from the AI providers aren't range-checked. A model that
-answers `"rating": "92%"` produces a rating of 92, which scores 18.4 on the
-P3 axis instead of at most 1. In a test, that result scored 4.46 against 0.80
-for an honest 4.8★ result. That breaks the 0–1 score range, and no penalty can
-pull it back down. Negative prices push P1 above 1 the same way.
-
-**Fix:** drop out-of-range values (rating outside 0–5, negative price) where
-provider results come in, and clamp every axis score to 0–1 in
-`_compute_gap_scores` as a second line of defence.
-
 ## B2. A vague follow-up can be served another conversation's answer
 
 Follow-ups the refinement parser doesn't recognise ("what about vegetarian

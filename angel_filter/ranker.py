@@ -465,11 +465,18 @@ def _compute_gap_scores(r: ProviderResult, c: QueryConstraints) -> dict[str, flo
     else:
         p3 = 0.5
 
+    # ProviderResult already drops out-of-range values, but a field assigned
+    # after construction (enrichment sets distance) skips that check. Clamping
+    # here keeps the 0-1 contract the final score's weights depend on.
     return {
-        "P1_price":    round(p1, 3),
-        "P2_distance": round(p2, 3),
-        "P3_rating":   round(p3, 3),
+        "P1_price":    round(_clamp01(p1), 3),
+        "P2_distance": round(_clamp01(p2), 3),
+        "P3_rating":   round(_clamp01(p3), 3),
     }
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
 
 
 def _axis_scored_mask(r: ProviderResult) -> dict[str, bool]:
