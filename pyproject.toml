@@ -3,7 +3,7 @@ name = "angel_filter"
 version = "0.1.0"
 description = "A local proxy agent that re-ranks multi-provider AI/search responses against user preferences using a local LLM."
 authors = ["CUNY Capstone Team"]
-license = "Apache-2.0"
+license = "MIT"
 readme = "README.md"
 packages = [{ include = "angel_filter" }]
 

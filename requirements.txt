@@ -1,28 +1,58 @@
-# Angel Filter — Python dependencies
-# Generated from the working local environment (Python 3.12.3)
-# Pin minor versions for reproducibility; patch versions float.
-
-# Web framework
-fastapi==0.128.0
-uvicorn[standard]==0.40.0
-starlette==0.50.0
-pydantic==2.12.5
-
-# HTTP client (used by all AI providers)
-httpx==0.28.1
-
-# Auth & sessions
-itsdangerous==2.2.0
-python-dotenv==1.2.1
-
-# Observability
-prometheus-client==0.25.0
-
-# Ollama client (embeddings + local LLM provider)
-# NOTE: Ollama itself must be installed and running separately.
-# On Render, omit OllamaProvider or point OLLAMA_URL at an external instance.
-ollama==0.6.2
-
-# Async runtime support
-anyio==4.12.1
-watchfiles==1.1.1
+# GENERATED from poetry.lock — do not edit by hand.
+# pyproject.toml is the single source of dependencies. After changing it, run:
+#
+#   poetry lock
+#   poetry export --without-hashes -f requirements.txt -o requirements.txt
+#
+# (needs the export plugin: `poetry self add poetry-plugin-export`)
+# CI fails if this file and poetry.lock disagree. It exists for deploy targets
+# that install with pip, such as Render (see render.yaml).
+annotated-doc==0.0.4 ; python_version >= "3.10" and python_version < "4.0"
+annotated-types==0.7.0 ; python_version >= "3.10" and python_version < "4.0"
+anyio==4.13.0 ; python_version >= "3.10" and python_version < "4.0"
+certifi==2026.4.22 ; python_version >= "3.10" and python_version < "4.0"
+click==8.3.3 ; python_version >= "3.10" and python_version < "4.0"
+colorama==0.4.6 ; python_version >= "3.10" and python_version < "4.0" and (platform_system == "Windows" or sys_platform == "win32")
+dnspython==2.8.0 ; python_version >= "3.10" and python_version < "4.0"
+email-validator==2.3.0 ; python_version >= "3.10" and python_version < "4.0"
+exceptiongroup==1.3.1 ; python_version == "3.10"
+fastapi-cli==0.0.24 ; python_version >= "3.10" and python_version < "4.0"
+fastapi-cloud-cli==0.17.0 ; python_version >= "3.10" and python_version < "4.0"
+fastapi==0.115.14 ; python_version >= "3.10" and python_version < "4.0"
+fastar==0.11.0 ; python_version >= "3.10" and python_version < "4.0"
+h11==0.16.0 ; python_version >= "3.10" and python_version < "4.0"
+httpcore==1.0.9 ; python_version >= "3.10" and python_version < "4.0"
+httptools==0.7.1 ; python_version >= "3.10" and python_version < "4.0"
+httpx==0.27.2 ; python_version >= "3.10" and python_version < "4.0"
+idna==3.13 ; python_version >= "3.10" and python_version < "4.0"
+itsdangerous==2.2.0 ; python_version >= "3.10" and python_version < "4.0"
+jinja2==3.1.6 ; python_version >= "3.10" and python_version < "4.0"
+markdown-it-py==4.0.0 ; python_version >= "3.10" and python_version < "4.0"
+markupsafe==3.0.3 ; python_version >= "3.10" and python_version < "4.0"
+mdurl==0.1.2 ; python_version >= "3.10" and python_version < "4.0"
+nlip-sdk @ git+https://github.com/nlip-project/nlip_sdk.git@8e3ef4bf176401e3af8afad3a0cde1c3a7eef6e4 ; python_version >= "3.10" and python_version < "4.0"
+nlip-server @ git+https://github.com/nlip-project/nlip_server.git@f299aa88d5b9105f6f57c9d7a743cb677acbc141 ; python_version >= "3.10" and python_version < "4.0"
+ollama==0.3.3 ; python_version >= "3.10" and python_version < "4.0"
+prometheus-client==0.20.0 ; python_version >= "3.10" and python_version < "4.0"
+pydantic-core==2.46.3 ; python_version >= "3.10" and python_version < "4.0"
+pydantic==2.13.3 ; python_version >= "3.10" and python_version < "4.0"
+pygments==2.20.0 ; python_version >= "3.10" and python_version < "4.0"
+python-dotenv==1.2.2 ; python_version >= "3.10" and python_version < "4.0"
+python-multipart==0.0.26 ; python_version >= "3.10" and python_version < "4.0"
+pyyaml==6.0.3 ; python_version >= "3.10" and python_version < "4.0"
+rich-toolkit==0.19.7 ; python_version >= "3.10" and python_version < "4.0"
+rich==15.0.0 ; python_version >= "3.10" and python_version < "4.0"
+rignore==0.7.6 ; python_version >= "3.10" and python_version < "4.0"
+sentry-sdk==2.58.0 ; python_version >= "3.10" and python_version < "4.0"
+shellingham==1.5.4 ; python_version >= "3.10" and python_version < "4.0"
+sniffio==1.3.1 ; python_version >= "3.10" and python_version < "4.0"
+starlette==0.46.2 ; python_version >= "3.10" and python_version < "4.0"
+tomli==2.4.1 ; python_version == "3.10"
+typer==0.24.2 ; python_version >= "3.10" and python_version < "4.0"
+typing-extensions==4.15.0 ; python_version >= "3.10" and python_version < "4.0"
+typing-inspection==0.4.2 ; python_version >= "3.10" and python_version < "4.0"
+urllib3==2.6.3 ; python_version >= "3.10" and python_version < "4.0"
+uvicorn==0.30.6 ; python_version >= "3.10" and python_version < "4.0"
+uvloop==0.22.1 ; python_version >= "3.10" and python_version < "4.0" and sys_platform != "win32" and sys_platform != "cygwin" and platform_python_implementation != "PyPy"
+watchfiles==1.1.1 ; python_version >= "3.10" and python_version < "4.0"
+websockets==16.0 ; python_version >= "3.10" and python_version < "4.0"

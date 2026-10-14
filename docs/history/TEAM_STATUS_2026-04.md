@@ -1,3 +1,7 @@
+> **Archived.** This is the original team's status report from April 27, 2026,
+> kept for history. Much of it is out of date. For the current state, see
+> [../../README.md](../../README.md) and [../KNOWN_ISSUES.md](../KNOWN_ISSUES.md).
+
 # Angel Filter : Team Status Report
 **Date:** April 27, 2026   
 **Next milestone:** May 1 : integrated demo (Dinesh returns)

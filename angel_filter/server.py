@@ -21,18 +21,9 @@ import logging
 import os
 import time
 
-from fastapi import Depends, FastAPI, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Response
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from starlette.middleware.sessions import SessionMiddleware
 
-from angel_filter.auth import (
-    build_authorize_url,
-    current_user,
-    exchange_code_for_username,
-    new_oauth_state,
-    require_session,
-)
 from angel_filter.cache import CACHE
 from angel_filter.conversation import (
     CONVERSATIONS,
@@ -42,7 +33,7 @@ from angel_filter.conversation import (
     effective_query,
     looks_like_a_refinement,
 )
-from angel_filter.limits import daily_budget_status, enforce_query_limits
+from angel_filter.limits import enforce_query_limits, nlip_limit_middleware
 from angel_filter.constraints import QueryConstraints
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.ranker import QueryIntent
@@ -50,22 +41,9 @@ from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesPr
 
 logger = logging.getLogger(__name__)
 
-# Secret used to sign session cookies. MUST be set in production — if it's
-# missing we use a random per-process value so the demo still boots, but
-# every restart will invalidate existing sessions, which is the desired
-# loud failure mode.
-_SESSION_SECRET = os.getenv("ANGEL_SESSION_SECRET") or os.urandom(32).hex()
-if not os.getenv("ANGEL_SESSION_SECRET"):
-    logger.warning(
-        "ANGEL_SESSION_SECRET not set; using a random per-process value. "
-        "Set it in env on any cloud deploy or sessions will reset on every "
-        "restart and rolling deploys will log everyone out."
-    )
-
-# Cookie hardening. Defaults are safe-for-cloud (HTTPS, cross-tab Lax).
-# Local HTTP dev must set ANGEL_COOKIE_SECURE=false to log in over http://.
-_COOKIE_SECURE = os.getenv("ANGEL_COOKIE_SECURE", "true").lower() == "true"
-_COOKIE_SAMESITE = os.getenv("ANGEL_COOKIE_SAMESITE", "lax")
+# The route nlip_server registers for message exchange (its router is mounted
+# under the "/nlip" prefix). Rate limiting is applied to this exact path.
+_NLIP_PATH = "/nlip/"
 
 # --- Prometheus metrics -------------------------------------------------------
 QUERY_COUNT = Counter(
@@ -363,12 +341,11 @@ if _NLIP_AVAILABLE:
 
 
     app = setup_server(AngelFilterApplication())
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=_SESSION_SECRET,
-        https_only=_COOKIE_SECURE,
-        same_site=_COOKIE_SAMESITE,
-    )
+
+    # nlip_server owns the /nlip/ route, so the rate limit and daily cap that
+    # /query gets through a dependency are applied here as middleware instead.
+    # Without this, the route the UI actually uses would be unmetered.
+    app.middleware("http")(nlip_limit_middleware(_NLIP_PATH))
 
     # Mount the demo UI routes onto the NLIP app so /query and / work for the
     # frontend regardless of whether NLIP is the active transport.
@@ -390,65 +367,11 @@ if _NLIP_AVAILABLE:
         priority: str | None = None  # "price"|"distance"|"rating"; None = auto-detect
 
     @app.get("/")
-    async def index(request: Request):
-        # Front of the app: require a session, otherwise redirect to /login.
-        if not current_user(request):
-            return RedirectResponse(url="/login", status_code=302)
+    async def index():
         index_path = _STATIC_DIR / "index.html"
         if index_path.exists():
             return FileResponse(index_path)
         return {"msg": "Angel Filter — POST to /query or /nlip/"}
-
-    @app.get("/login")
-    async def login_page(request: Request):
-        # Already signed in? Skip the form.
-        if current_user(request):
-            return RedirectResponse(url="/", status_code=302)
-        login_path = _STATIC_DIR / "login.html"
-        if login_path.exists():
-            return FileResponse(login_path)
-        return {"msg": "login.html missing from static/"}
-
-    @app.get("/auth/github/login")
-    async def github_login(request: Request):
-        # Step 1: generate a one-time state, stash it in the session,
-        # then bounce the browser to GitHub's authorize page.
-        state = new_oauth_state()
-        request.session["oauth_state"] = state
-        return RedirectResponse(url=build_authorize_url(state), status_code=302)
-
-    @app.get("/auth/github/callback")
-    async def github_callback(request: Request):
-        # Step 2: GitHub redirects here with ?code=...&state=...  We
-        # verify state, swap code for an access token, fetch /user, and
-        # check the allowlist. All failure modes redirect back to /login
-        # with an ?error= flag the page can surface.
-        params = request.query_params
-        if params.get("error"):
-            return RedirectResponse(url="/login?error=github_denied", status_code=302)
-
-        expected_state = request.session.pop("oauth_state", None)
-        if not expected_state or params.get("state") != expected_state:
-            return RedirectResponse(url="/login?error=state_mismatch", status_code=302)
-
-        code = params.get("code")
-        if not code:
-            return RedirectResponse(url="/login?error=exchange_failed", status_code=302)
-
-        username = await exchange_code_for_username(code)
-        if not username:
-            # Either GitHub rejected, the network failed, or the user
-            # isn't on the allowlist. exchange_code_for_username logs
-            # the specific reason; the user sees a generic 403 page.
-            return RedirectResponse(url="/login?error=forbidden", status_code=302)
-
-        request.session["user"] = username
-        return RedirectResponse(url="/", status_code=302)
-
-    @app.post("/logout")
-    async def logout(request: Request):
-        request.session.clear()
-        return JSONResponse({"ok": True})
 
     # setup_server() mounts nlip_server's own health router, whose GET /health
     # returns a bare {"status": "healthy"}. FastAPI matches the first route
@@ -466,7 +389,7 @@ if _NLIP_AVAILABLE:
         return _health_response(mode="nlip", nlip_available=True)
 
     @app.post("/query")
-    async def query(body: QueryIn, _user: str = Depends(enforce_query_limits)):
+    async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
         with QUERY_LATENCY.time():
             try:
                 response = await ORCHESTRATOR.handle_query(
@@ -485,23 +408,22 @@ if _NLIP_AVAILABLE:
                 raise
         return _serialize_response(response)
 
-    # These two existed only in the fallback branch, so in NLIP mode — the path
-    # that actually runs — they 404'd: the UI's "Recent queries" button was dead
-    # and there was no way to clear a stale cache. Both require a session; the
-    # fallback copies predate the auth layer and are left as-is only because
-    # that branch is demo insurance, not the deployed path.
+    # With no login, these are open to anyone who can reach the server:
+    # /history shows every caller's recent queries and /cache/clear wipes the
+    # shared cache. Deciding who may call them is part of the auth starter task
+    # in docs/KNOWN_ISSUES.md.
     @app.get("/history")
-    async def history(_user: str = Depends(require_session)):
+    async def history():
         return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
 
     @app.post("/cache/clear")
-    async def cache_clear(_user: str = Depends(require_session)):
+    async def cache_clear():
         CACHE._store.clear()
         CACHE._history.clear()
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
-    async def metrics(_user: str = Depends(require_session)):
+    async def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -521,12 +443,6 @@ else:
         description="A local proxy that re-ranks multi-provider AI results and penalizes sponsored content.",
         version="0.1.0",
     )
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=_SESSION_SECRET,
-        https_only=_COOKIE_SECURE,
-        same_site=_COOKIE_SAMESITE,
-    )
 
     _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -542,61 +458,18 @@ else:
         priority: str | None = None  # "price"|"distance"|"rating"; None = auto-detect
 
     @app.get("/")
-    async def index(request: Request):
-        if not current_user(request):
-            return RedirectResponse(url="/login", status_code=302)
+    async def index():
         index_path = _STATIC_DIR / "index.html"
         if index_path.exists():
             return FileResponse(index_path)
         return {"msg": "Angel Filter is running (fallback mode). POST to /query."}
-
-    @app.get("/login")
-    async def login_page(request: Request):
-        if current_user(request):
-            return RedirectResponse(url="/", status_code=302)
-        login_path = _STATIC_DIR / "login.html"
-        if login_path.exists():
-            return FileResponse(login_path)
-        return {"msg": "login.html missing from static/"}
-
-    @app.get("/auth/github/login")
-    async def github_login(request: Request):
-        state = new_oauth_state()
-        request.session["oauth_state"] = state
-        return RedirectResponse(url=build_authorize_url(state), status_code=302)
-
-    @app.get("/auth/github/callback")
-    async def github_callback(request: Request):
-        params = request.query_params
-        if params.get("error"):
-            return RedirectResponse(url="/login?error=github_denied", status_code=302)
-
-        expected_state = request.session.pop("oauth_state", None)
-        if not expected_state or params.get("state") != expected_state:
-            return RedirectResponse(url="/login?error=state_mismatch", status_code=302)
-
-        code = params.get("code")
-        if not code:
-            return RedirectResponse(url="/login?error=exchange_failed", status_code=302)
-
-        username = await exchange_code_for_username(code)
-        if not username:
-            return RedirectResponse(url="/login?error=forbidden", status_code=302)
-
-        request.session["user"] = username
-        return RedirectResponse(url="/", status_code=302)
-
-    @app.post("/logout")
-    async def logout(request: Request):
-        request.session.clear()
-        return JSONResponse({"ok": True})
 
     @app.get("/health")
     async def health():
         return _health_response(mode="fallback", nlip_available=False)
 
     @app.post("/query")
-    async def query(body: QueryIn, _user: str = Depends(enforce_query_limits)):
+    async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
         from fastapi import HTTPException as _HTTPException
 
         # Fold location into the cache's preference component so two users at
@@ -645,7 +518,7 @@ else:
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
-    async def metrics(_user: str = Depends(require_session)):
+    async def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

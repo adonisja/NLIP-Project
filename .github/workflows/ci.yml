@@ -19,10 +19,41 @@ jobs:
           python-version: "3.12"
 
       - name: Install Poetry
-        run: pip install poetry
+        run: pip install poetry poetry-plugin-export
 
       - name: Install dependencies
         run: poetry install --no-interaction
 
       - name: Run tests
         run: poetry run pytest -v
+
+      # requirements.txt is what deployments install. If it drifts from
+      # poetry.lock, a deploy can come up without the NLIP libraries, and the
+      # UI cannot search. Regenerate with the command in its header.
+      - name: Check requirements.txt matches poetry.lock
+        run: |
+          poetry check --lock
+          poetry export --without-hashes -f requirements.txt -o /tmp/exported.txt
+          diff <(grep -v '^#' requirements.txt) <(grep -v '^#' /tmp/exported.txt)
+
+  deploy-install:
+    # Installs the way Render does (pip + requirements.txt) and proves the
+    # result runs in NLIP mode, not the fallback.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install like a deployment
+        run: pip install -r requirements.txt pytest "pytest-asyncio<0.24"
+
+      - name: NLIP libraries are importable
+        run: python -c "import nlip_sdk.nlip, nlip_server.server"
+
+      - name: Run tests
+        run: python -m pytest -q

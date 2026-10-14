@@ -25,7 +25,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_query_cache():
-    """Empty the process-wide query cache around every test.
+    """Empty the process-wide caches and rate-limit counters around every test.
 
     CACHE is module-level state shared by both transports. Once the NLIP path
     started caching, a test whose query matched an earlier test's key was served
@@ -37,7 +37,7 @@ def _clear_query_cache():
     attributes, so this mirrors it rather than inventing an API.
     """
     from angel_filter.cache import CACHE
-    from angel_filter import geocode
+    from angel_filter import geocode, limits
 
     def _reset():
         CACHE._store.clear()
@@ -47,6 +47,9 @@ def _clear_query_cache():
         # "Joe's Pizza" makes the next one's lookup count zero.
         geocode._coord_cache.clear()
         geocode._locality_cache.clear()
+        # Rate-limit counters are per process too; without this, enough
+        # requests across the suite would trip the limit in an unrelated test.
+        limits.reset_limits()
 
     _reset()
     yield
