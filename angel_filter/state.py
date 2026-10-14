@@ -148,6 +148,10 @@ _SCHEMA = "angel_state"
 # conversations) must not be readable with a project's public API key. Row
 # level security is enabled as a second barrier; the app connects as the
 # tables' owner, which RLS doesn't restrict.
+# Mirrored in supabase/migrations/*_angel_state*.sql, which Supabase's GitHub
+# integration applies on merge to main. Running both is harmless (every
+# statement is idempotent); tests/test_supabase_migrations.py keeps them equal.
+# To change the schema, add a new migration file and append its statements here.
 _MIGRATION = f"""
 CREATE SCHEMA IF NOT EXISTS {_SCHEMA};
 CREATE TABLE IF NOT EXISTS {_SCHEMA}.kv (

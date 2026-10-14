@@ -129,10 +129,14 @@ later works the same way (Neon, a paid Render database, or a local one).
 
 1. Create a free account at <https://supabase.com/dashboard> and a new project
    in the region nearest your server. Save the database password it asks
-   for.
-2. Click **Connect** at the top of the project and copy the **Session pooler**
-   connection string. It looks like
-   `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+   for. Under **Security**, turn **Enable Data API** and **Automatically
+   expose new tables** off (the app doesn't use the API), and leave
+   **Enable automatic RLS** on.
+2. Click **Connect** at the top of the project, choose the **Direct**
+   ("Connection string") tab, and copy the **Session pooler** string. Ignore
+   the Framework tab and its `npm install` and `NEXT_PUBLIC_…` steps; those
+   are for JavaScript apps using Supabase's client libraries. It looks like
+   `postgresql://postgres.<project-ref>:<password>@aws-<n>-<region>.pooler.supabase.com:5432/postgres`.
    Use the pooler, not the "Direct connection": direct connections need IPv6,
    which Render and many other hosts don't have. The Transaction pooler (port
    6543) also works.
@@ -157,6 +161,24 @@ Actions). GitHub disables scheduled workflows in a repository with no activity
 for 60 days, so check the Actions tab now and then. If the project does pause,
 restore it from the Supabase dashboard; the app keeps running on in-process
 state meanwhile (see below).
+
+#### Supabase GitHub integration (optional)
+
+The repo has a `supabase/` folder, so Supabase can apply schema changes from
+it: **Project Settings → Integrations → GitHub**. Choose this repository,
+working directory `.`, turn **Deploy to production** on with branch `main`, and
+leave automatic branching off (preview branches need the paid Pro plan).
+
+From then on, merging a PR to `main` applies any *new* files in
+`supabase/migrations/` to the production database. That's the only thing it
+deploys from this repo. API, Auth and seed settings in `supabase/config.toml`
+are ignored in production (they only affect a local `supabase start`), so
+change those in the dashboard. The integration doesn't connect the app to the
+database; that's still `ANGEL_DATABASE_URL`.
+
+The app creates its tables itself too, so the integration is optional: with
+or without it, `angel_state` ends up the same. How to change the schema is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#changing-the-database-schema).
 
 **If the database becomes unreachable** (paused, down, or a wrong URL), the
 app logs a warning and keeps running on in-process state, exactly as if

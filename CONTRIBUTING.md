@@ -100,6 +100,27 @@ poetry export --without-hashes -f requirements.txt -o requirements.txt
 Read what changed upstream first. The export step keeps deployments in step
 (CI fails if `requirements.txt` and `poetry.lock` disagree).
 
+## Changing the database schema
+
+The schema is defined twice, on purpose: in `supabase/migrations/`, which
+Supabase's GitHub integration applies on merge to `main`, and in
+`_MIGRATION` in [angel_filter/state.py](angel_filter/state.py), which the app
+runs itself so it works on any Postgres. To change it:
+
+1. Add a **new** file `supabase/migrations/<YYYYMMDDHHMMSS>_angel_state_<what>.sql`.
+   Never edit a migration that has already been applied; production has
+   already run it and won't run it again.
+2. Make every statement safe to run twice (`IF NOT EXISTS`, `IF EXISTS`),
+   because the app runs the same statements on start.
+3. Append the same statements to `_MIGRATION`.
+4. Run the tests: `tests/test_supabase_migrations.py` fails if the two copies
+   differ.
+
+Tables for new features (user accounts for the login task, say) can live in
+their own migrations without touching `_MIGRATION`, if the app doesn't need
+to create them itself. Keep them out of `public` unless they're meant to be
+served by Supabase's Data API, and enable row level security either way.
+
 ## Changing the ranker
 
 Read [docs/DESIGN.md](docs/DESIGN.md) first. In particular:

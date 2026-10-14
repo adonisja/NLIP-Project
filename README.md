@@ -212,6 +212,9 @@ angel_filter/
   providers/            one file per provider, plus base.py and mock.py
 static/
   index.html            demo UI
+supabase/
+  config.toml           Supabase CLI config (local only; production ignores it)
+  migrations/           schema, applied by Supabase's GitHub integration on merge
 tests/                  pytest suite, fully offline
 docs/
   SETUP.md              full setup, all providers, deployment, troubleshooting
