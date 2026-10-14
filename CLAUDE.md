@@ -9,6 +9,7 @@ CUNY capstone (spring 2026) and has been handed to new maintainers; the
 original author (@adonisja) is their mentor.
 
 - `README.md`: overview, architecture diagram, quickstart, reading order
+- `docs/HANDOFF.md`: the takeover checklist (accounts, secrets, deploy)
 - `docs/DESIGN.md`: how scoring works and why. Read it before touching `ranker.py`.
 - `docs/KNOWN_ISSUES.md`: unfinished work
 - `CONTRIBUTING.md`: workflow and conventions
@@ -66,6 +67,14 @@ or bypass it without discussion. The missing-data rules in `_axis_bonus` are
 deliberate (see `docs/DESIGN.md` §4); if `test_axis_scoring.py` fails after a
 change, the change is probably wrong. If you change the embedding model,
 update `DEFAULT_EMBED_MODEL` and the docs.
+
+## Database schema
+
+`angel_state` is defined twice on purpose: `supabase/migrations/*_angel_state*.sql`
+(applied by Supabase's GitHub integration on merge) and `_MIGRATION` in
+`state.py` (run by the app). Never edit an applied migration; add a new file
+and append the same statements to `_MIGRATION`.
+`tests/test_supabase_migrations.py` fails if they differ.
 
 ## Testing
 

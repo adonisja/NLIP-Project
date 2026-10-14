@@ -140,12 +140,25 @@ later works the same way (Neon, a paid Render database, or a local one).
    Use the pooler, not the "Direct connection": direct connections need IPv6,
    which Render and many other hosts don't have. The Transaction pooler (port
    6543) also works.
-3. Put your password into the string. If it contains characters like `@`,
-   `/` or `#`, URL-encode them (or reset the password to letters and digits).
-4. Set it as `ANGEL_DATABASE_URL` (in `.env` locally, in the dashboard on
-   Render) and restart.
-5. Check `/health`: it should report `"state": {"backend": "postgres",
-   "reachable": true}`.
+3. Add it to `.env` as its own line, still with `[YOUR-PASSWORD]` in it, and
+   save. No `#`, spaces or quotes:
+   ```
+   ANGEL_DATABASE_URL=postgresql://postgres.<project-ref>:[YOUR-PASSWORD]@aws-<n>-<region>.pooler.supabase.com:5432/postgres
+   ```
+4. Let the helper put the password in. It asks with hidden input, encodes any
+   special characters, writes it into `.env`, and tests the connection:
+   ```bash
+   poetry run python scripts/check_database.py --set-password
+   ```
+   You want `CONNECTED`. Typing or pasting the password into the URL by hand
+   is the usual way this goes wrong: a paste that loses a few characters gives
+   "password authentication failed", and so does an unencoded `@` or `#`.
+5. **Restart the server** (`.env` is only read at startup; `--reload` doesn't
+   notice it), then check `/health`: it should report
+   `"state": {"backend": "postgres", "reachable": true}`.
+
+Run `poetry run python scripts/check_database.py` (without the flag) at any
+time to diagnose the connection. It never prints the password.
 
 The app creates its tables on first use, in a schema called `angel_state`.
 Nothing goes in `public`: Supabase serves `public` through its auto-generated
@@ -233,14 +246,18 @@ match), so it gets the same versions CI tests, NLIP libraries included.
    the [login starter task](KNOWN_ISSUES.md#1-design-and-build-login-and-access-control)
    before deploying publicly is worth considering.
 2. **Set the secrets** in the Render dashboard: the provider keys marked
-   `sync: false` in `render.yaml`. Set only the ones you use.
+   `sync: false` in `render.yaml`, and `ANGEL_DATABASE_URL` (the same value as
+   in your `.env`). Set only the provider keys you use. Pick the Render region
+   closest to your Supabase project's (Supabase `us-west-2` is Render's
+   Oregon).
 3. **Set `OPENAI_API_KEY` for embeddings.** Render can't run Ollama, and
    without an embedding backend the ranker falls back to keyword overlap.
 4. **Don't set `OLLAMA_MODEL`** unless `OLLAMA_URL` points at an Ollama server
    you host somewhere reachable. Otherwise it enables a provider that fails on
    every query.
-5. **Check `/health` after the deploy.** It must report `"mode": "nlip"`. The
-   UI only talks to `/nlip/`, so in fallback mode it can't search.
+5. **Check `/health` after the deploy.** It must report `"mode": "nlip"` (the
+   UI only talks to `/nlip/`, so in fallback mode it can't search) and
+   `"state": {"backend": "postgres", "reachable": true}`.
 6. **Check that rate limiting sees real client IPs.** `render.yaml` sets
    `ANGEL_TRUSTED_PROXY_HOPS=1`, which assumes Render adds exactly one entry
    to `X-Forwarded-For`. To confirm, search a few times past the per-minute
@@ -257,6 +274,26 @@ counters, which means the daily spending cap resets too.
 ---
 
 ## Troubleshooting
+
+### Installing
+
+| Symptom | Cause |
+|---|---|
+| `dyld: Library not loaded: …/python@3.x/…` when running `poetry` | Poetry was installed against a Homebrew Python that Homebrew has since upgraded or removed, so Poetry itself can't start. Reinstall it on a stable Python: `pipx install --force --python python3.12 poetry`, then `poetry env use python3.12` and `poetry install` in the project. |
+| `poetry install` fails fetching `nlip-sdk` / `nlip-server` | They install from GitHub, so Git must be installed and github.com reachable. |
+
+### Database
+
+Start with `poetry run python scripts/check_database.py`: it checks the URL
+and tries to connect, without printing the password.
+
+| Symptom | Cause |
+|---|---|
+| `/health` shows `"backend": "memory"` | The server didn't see `ANGEL_DATABASE_URL`. The line isn't in `.env` (not saved, commented out, or typed with spaces or quotes), or the server wasn't restarted after you added it. |
+| `"reachable": false`, and the helper says `password authentication failed` | Wrong password, almost always from a paste that lost characters or an unencoded `@`, `/` or `#`. Run `scripts/check_database.py --set-password`, or reset the password in Supabase (Connect → Direct → Reset database password). Then restart the server. |
+| `"reachable": false` right after fixing `.env` | The running server still has the old URL. Restart it. |
+| The helper says it can't reach the host | Wrong host or port (use the Session pooler string, port 5432), or the free project is paused: restore it from the Supabase dashboard. |
+| No `kv` / `hits` tables in Supabase's Table Editor | They're in the `angel_state` schema, not `public`: switch the schema dropdown. They appear after the app's first connection. |
 
 ### Server
 
