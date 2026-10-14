@@ -45,6 +45,64 @@ class QueryConstraints:
     context_prefix: str = ""
 
 
+# --- Spelled-out numbers ------------------------------------------------------
+# "under twenty bucks", "four and a half stars", "half a mile". These are
+# rewritten to digits before the patterns below run, so each pattern only has
+# to understand one way of writing a number.
+
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_UNIT_WORDS = "|".join(sorted(_UNITS, key=len, reverse=True))
+_TEN_WORDS = "|".join(_TENS)
+
+_NUMBER_WORDS_RE = re.compile(
+    rf"""
+    (?:
+    \b(?:(?P<a>a|one)\s+hundred(?:\s+and)?\s*)?          # "a hundred (and)"
+    (?:
+        (?P<tens>{_TEN_WORDS})(?:[\s-]+(?P<unit_after_ten>{_UNIT_WORDS}))?
+      | (?P<unit>{_UNIT_WORDS})
+    )
+    (?P<half>\s+and\s+a\s+half)?\b
+    | \b(?P<hundred_only>a|one)\s+hundred\b
+    )
+    # Only a number that a unit follows. "lunch for at least two people" must
+    # not become a two-star minimum through the rating pattern's "at least N".
+    (?=\s*-?\s*(?:dollars?|bucks?|miles?|mi\b|km\b|kilometers?|\+?\s*stars?))
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# "half a mile" / "half mile" carry no number word for the pattern above.
+_HALF_MILE_RE = re.compile(r"\bhalf\s+(?:a\s+)?mile\b", re.IGNORECASE)
+
+
+def _number_words_to_digits(text: str) -> str:
+    def convert(m: re.Match) -> str:
+        if m.group("hundred_only"):
+            return "100"
+        value = 100 if m.group("a") else 0
+        if m.group("tens"):
+            value += _TENS[m.group("tens").lower()]
+            if m.group("unit_after_ten"):
+                value += _UNITS[m.group("unit_after_ten").lower()]
+        else:
+            value += _UNITS[m.group("unit").lower()]
+        number = f"{value}.5" if m.group("half") else str(value)
+        return number
+
+    text = _HALF_MILE_RE.sub("0.5 miles", text)
+    return _NUMBER_WORDS_RE.sub(convert, text)
+
+
 # --- Regex patterns -----------------------------------------------------------
 
 # Price: "$15", "under $20", "budget $10", "15 dollars", "less than $30"
@@ -92,6 +150,7 @@ def extract_constraints(query: str) -> QueryConstraints:
     Unrecognised constraints are left as None — the ranker handles None
     gracefully by falling back to neutral axis scoring.
     """
+    query        = _number_words_to_digits(query)
     budget       = _extract_price(query)
     max_distance = _extract_distance(query)
     min_rating   = _extract_rating(query)

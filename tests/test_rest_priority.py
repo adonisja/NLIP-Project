@@ -128,16 +128,6 @@ def test_query_model_accepts_priority_and_defaults_to_none():
 # Parser and cache-key tests both pass even if the handler drops the field on the
 # floor — which is precisely the bug being fixed. These drive the real endpoint.
 
-def _reset_cache(cache) -> None:
-    """Empty the shared query cache between tests.
-
-    QueryCache exposes no public clear(); the /cache/clear endpoint reaches into
-    the same two attributes, so this mirrors it rather than inventing an API.
-    """
-    cache._store.clear()
-    cache._history.clear()
-
-
 @pytest.fixture
 def rest_client(monkeypatch):
     """A TestClient with rate limits stubbed and the orchestrator spied.
@@ -164,14 +154,12 @@ def rest_client(monkeypatch):
             )
 
     monkeypatch.setattr(server, "ORCHESTRATOR", _Spy())
-    _reset_cache(server.CACHE)
     server.app.dependency_overrides[enforce_query_limits] = lambda: "tester"
     try:
         yield TestClient(server.app), seen
     finally:
         server.app.dependency_overrides.clear()
-        _reset_cache(server.CACHE)
-
+    
 
 @pytest.mark.parametrize("sent,expected", [
     ("price",    QueryIntent.PRICE),
@@ -199,3 +187,21 @@ def test_post_query_with_garbage_priority_does_not_500(rest_client):
     r = client.post("/query", json={"query": "lunch", "priority": "banana"})
     assert r.status_code == 200
     assert seen["intent"] is None
+
+
+def test_nlip_mode_query_route_uses_the_cache(rest_client):
+    """Both /query handlers share one cached path; NLIP mode used to skip the cache."""
+    client, seen = rest_client
+    calls = []
+    import angel_filter.server as server
+    original = server.ORCHESTRATOR.handle_query
+
+    async def counting(user_query, **kwargs):
+        calls.append(user_query)
+        return await original(user_query, **kwargs)
+
+    server.ORCHESTRATOR.handle_query = counting
+    first = client.post("/query", json={"query": "ramen"}).json()
+    second = client.post("/query", json={"query": "ramen"}).json()
+    assert len(calls) == 1, "the repeat REST query re-ran every provider"
+    assert (first["cached"], second["cached"]) == (False, True)

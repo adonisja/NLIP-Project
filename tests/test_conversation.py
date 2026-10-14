@@ -149,41 +149,62 @@ def test_refinement_reuses_the_previous_subject():
 
 # --- The store -----------------------------------------------------------------
 
-def test_turns_are_isolated_by_token():
+@pytest.mark.asyncio
+async def test_turns_are_isolated_by_token():
     """One conversation's history must never leak into another's."""
     store = ConversationStore()
-    store.record("token-a", _turn(query="sushi"))
+    await store.record("token-a", _turn(query="sushi"))
 
-    assert store.get("token-b") is None
-    assert store.get("token-a").latest.query == "sushi"
+    assert await store.get("token-b") is None
+    assert (await store.get("token-a")).latest.query == "sushi"
 
 
-def test_no_token_means_no_memory():
+@pytest.mark.asyncio
+async def test_no_token_means_no_memory():
     """A stateless client gets a plain search, not an error."""
     store = ConversationStore()
-    store.record(None, _turn())
+    await store.record(None, _turn())
 
-    assert store.get(None) is None
+    assert await store.get(None) is None
 
 
-def test_history_is_bounded():
+@pytest.mark.asyncio
+async def test_history_is_bounded():
     """A long conversation must not grow without limit."""
     from angel_filter.conversation import MAX_TURNS
 
     store = ConversationStore()
     for i in range(MAX_TURNS + 5):
-        store.record("t", _turn(query=f"q{i}"))
+        await store.record("t", _turn(query=f"q{i}"))
 
-    assert len(store.get("t").turns) == MAX_TURNS
-    assert store.get("t").latest.query == f"q{MAX_TURNS + 4}"
+    conversation = await store.get("t")
+    assert len(conversation.turns) == MAX_TURNS
+    assert conversation.latest.query == f"q{MAX_TURNS + 4}"
 
 
-def test_stale_conversations_are_pruned():
-    store = ConversationStore(ttl_seconds=1)
-    store.record("old", _turn())
-    store._store["old"].last_seen = time.time() - 10
+@pytest.mark.asyncio
+async def test_stale_conversations_expire():
+    from angel_filter.state import MemoryStore
 
-    assert store.get("old") is None
+    clock = {"now": 1000.0}
+    store = ConversationStore(ttl_seconds=60, store=MemoryStore(clock=lambda: clock["now"]))
+    await store.record("old", _turn())
+    clock["now"] += 61
+
+    assert await store.get("old") is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_survives_the_round_trip_through_the_store():
+    """Turns are stored as JSON; every field a refinement reads must come back."""
+    store = ConversationStore()
+    turn = _turn(query="ramen", budget=20.0, price=18.0, distance=0.4, rating=4.6)
+    await store.record("t", turn)
+
+    back = (await store.get("t")).latest
+    assert (back.query, back.top_title, back.top_price, back.top_distance, back.top_rating) == (
+        "ramen", turn.top_title, 18.0, 0.4, 4.6)
+    assert back.constraints.budget == 20.0
 
 
 def test_context_prefix_summarises_recent_turns():
@@ -255,9 +276,7 @@ def spy_session(monkeypatch):
 
     spy = _SpyOrchestrator()
     monkeypatch.setattr(server, "ORCHESTRATOR", spy)
-    CONVERSATIONS._store.clear()
     yield server.AngelFilterSession(), spy
-    CONVERSATIONS._store.clear()
 
 
 def _msg(text, token=None):
@@ -440,3 +459,36 @@ async def test_continue_without_a_recognised_delta_sends_context(spy_session):
 
     assert spy.calls[1]["override_constraints"] is None
     assert "lunch under $20" in spy.calls[1]["context_prefix"]
+
+
+@pytest.mark.asyncio
+async def test_a_contextual_follow_up_is_not_served_another_conversations_answer(spy_session):
+    """The same vague follow-up in two conversations must reach the providers twice.
+
+    The context prepended to the prompt is what makes the answer conversation-
+    specific. It was not in the cache key, so conversation B's "what about
+    vegetarian options" was answered from conversation A's sushi results.
+    """
+    session, spy = spy_session
+
+    await session.execute(_msg("sushi in brooklyn", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options", token="conv-a"))
+    await session.execute(_msg("tacos in queens", token="conv-b"))
+    await session.execute(_msg("what about vegetarian options", token="conv-b"))
+
+    follow_ups = [c for c in spy.calls if c["query"] == "what about vegetarian options"]
+    assert len(follow_ups) == 2, "conversation B was served conversation A's cached answer"
+    assert "tacos in queens" in follow_ups[1]["context_prefix"]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_search_is_not_served_a_contextual_answer(spy_session):
+    """The reverse: a cached follow-up must not answer the same words asked cold."""
+    session, spy = spy_session
+
+    await session.execute(_msg("sushi in brooklyn", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options", token="conv-a"))
+    await session.execute(_msg("what about vegetarian options"))   # no conversation
+
+    assert len(spy.calls) == 3
+    assert spy.calls[2]["context_prefix"] == ""

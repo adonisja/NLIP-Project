@@ -39,10 +39,25 @@ None of that carries over when you clone.
 poetry run pytest
 ```
 
-Tests must not need the network, API keys, or Ollama. Use `MockProvider` or
-canned responses, and set `ranker._ollama_available = False` for
-deterministic ranking. `tests/conftest.py` already sets `OLLAMA_MODEL` so the
-server module can be imported, and clears the shared caches between tests.
+Tests must not need the network, API keys, Ollama, or a database. Use
+`MockProvider` or canned responses, and set `ranker._ollama_available = False`
+for deterministic ranking. `tests/conftest.py` already sets `OLLAMA_MODEL` so
+the server module can be imported, and gives every test a fresh, empty state
+store.
+
+The Postgres state backend has its own tests, which skip unless a throwaway
+database is available. To run them, and the whole suite on Postgres, as CI
+does:
+
+```bash
+docker run -d --rm --name angel-pg -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:16-alpine
+export ANGEL_TEST_DATABASE_URL=postgresql://postgres:test@localhost:5432/postgres
+poetry run pytest                              # includes the Postgres store tests
+ANGEL_TEST_STORE=postgres poetry run pytest    # the whole app on Postgres
+```
+
+Never point `ANGEL_TEST_DATABASE_URL` at a real database: the tests empty
+its `angel_state` tables.
 
 Any bug fix should come with a test that fails without the fix.
 
@@ -58,8 +73,10 @@ Any bug fix should come with a test that fails without the fix.
    really know it. Never guess.** The ranker treats missing data specially
    (see [docs/DESIGN.md](docs/DESIGN.md#4-missing-data-is-not-average-data)),
    and a made-up distance or rating is worse than none.
-4. Set `sponsored` from real information if the provider has it. See
-   [KNOWN_ISSUES.md #2](docs/KNOWN_ISSUES.md#2-no-live-result-is-ever-flagged-as-sponsored).
+4. Set `sponsored=True` if the provider itself marks a result as an ad.
+   Otherwise leave it `False`: [sponsorship.py](angel_filter/sponsorship.py)
+   checks every result after the fan-out, so don't add detection inside a
+   provider.
 5. Raise `ProviderError` on recoverable failures. The orchestrator logs it and
    carries on with the other providers.
 6. Export it from `angel_filter/providers/__init__.py`, and register it in
@@ -67,6 +84,21 @@ Any bug fix should come with a test that fails without the fix.
    check for its env variable.
 7. Add a test with canned responses (see
    [tests/test_google_places.py](tests/test_google_places.py)).
+
+## Updating the NLIP libraries
+
+`pyproject.toml` follows the `main` branch of `nlip-sdk` and `nlip-server`,
+but `poetry.lock` pins exact commits, so nothing changes until you choose to.
+To update:
+
+```bash
+poetry update nlip-sdk nlip-server
+poetry run pytest
+poetry export --without-hashes -f requirements.txt -o requirements.txt
+```
+
+Read what changed upstream first. The export step keeps deployments in step
+(CI fails if `requirements.txt` and `poetry.lock` disagree).
 
 ## Changing the ranker
 

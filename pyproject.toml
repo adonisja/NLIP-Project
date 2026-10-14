@@ -17,6 +17,7 @@ ollama = "^0.3.0"
 python-dotenv = "^1.0.1"
 prometheus-client = "^0.20.0"
 itsdangerous = "^2.2.0"
+asyncpg = ">=0.29,<1"   # shared state when ANGEL_DATABASE_URL is set (state.py)
 
 # NLIP libraries per Mentor D
 nlip-sdk = { git = "https://github.com/nlip-project/nlip_sdk.git", branch = "main" }

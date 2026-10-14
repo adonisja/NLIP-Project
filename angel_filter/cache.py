@@ -1,70 +1,60 @@
-"""Query result cache — in-memory, TTL-based.
+"""Query result cache, TTL-based, kept in the shared store (see state.py).
 
 Keyed by (query, preference) normalized to lowercase stripped strings.
-Entries expire after TTL_SECONDS. No external dependencies.
+Entries expire after TTL_SECONDS: an expired entry is never returned, and
+the store deletes it later (see state.py).
 """
 
 from __future__ import annotations
 
 import hashlib
-import time
-from dataclasses import dataclass, field
 from typing import Any
+
+from angel_filter.state import PREFIX, get_store
 
 TTL_SECONDS = 3 * 60 * 60  # 3 hours
 MAX_HISTORY = 10
 
-
-@dataclass
-class CacheEntry:
-    payload: dict[str, Any]
-    stored_at: float = field(default_factory=time.time)
-
-    def is_fresh(self) -> bool:
-        return (time.time() - self.stored_at) < TTL_SECONDS
-
-    def age_minutes(self) -> int:
-        return int((time.time() - self.stored_at) / 60)
+_ENTRY = PREFIX + "cache:"
+_HISTORY = PREFIX + "cache-history"
 
 
 class QueryCache:
-    def __init__(self) -> None:
-        self._store: dict[str, CacheEntry] = {}
-        # Ordered list of (key, query_text) for history — most recent first
-        self._history: list[tuple[str, str]] = []
+    """Async facade over the store. Holds no state of its own."""
 
     def _key(self, query: str, preference: str | None) -> str:
         combined = f"{query.strip().lower()}|{(preference or '').strip().lower()}"
-        return hashlib.md5(combined.encode()).hexdigest()
+        return _ENTRY + hashlib.md5(combined.encode()).hexdigest()
 
-    def get(self, query: str, preference: str | None) -> dict[str, Any] | None:
-        entry = self._store.get(self._key(query, preference))
-        if entry and entry.is_fresh():
-            return entry.payload
-        return None
+    async def get(self, query: str, preference: str | None) -> dict[str, Any] | None:
+        entry = await get_store().get(self._key(query, preference))
+        return entry["payload"] if entry else None
 
-    def set(self, query: str, preference: str | None, payload: dict[str, Any]) -> None:
+    async def set(self, query: str, preference: str | None, payload: dict[str, Any]) -> None:
         key = self._key(query, preference)
-        self._store[key] = CacheEntry(payload=payload)
+        store = get_store()
+        # The query text travels with the entry so /history can show it.
+        await store.set(key, {"query": query.strip(), "payload": payload}, ttl=TTL_SECONDS)
+        await store.push_recent(_HISTORY, key, MAX_HISTORY)
 
-        # Update history — remove duplicates, prepend, cap at MAX_HISTORY
-        self._history = [(k, q) for k, q in self._history if k != key]
-        self._history.insert(0, (key, query.strip()))
-        self._history = self._history[:MAX_HISTORY]
+    async def history(self) -> list[str]:
+        """The MAX_HISTORY most recent query strings still cached, freshest first."""
+        store = get_store()
+        keys = await store.recent(_HISTORY)
+        entries = await store.get_many(keys)
+        return [e["query"] for e in entries if e]
 
-    def history(self) -> list[str]:
-        """Return the MAX_HISTORY most recent query strings, freshest first."""
-        fresh = []
-        for key, query_text in self._history:
-            entry = self._store.get(key)
-            if entry and entry.is_fresh():
-                fresh.append(query_text)
-        return fresh
+    async def stats(self) -> dict[str, int]:
+        store = get_store()
+        return {
+            "entries": await store.count_prefix(_ENTRY),
+            "history": len(await self.history()),
+        }
 
-    def stats(self) -> dict[str, int]:
-        total = len(self._store)
-        fresh = sum(1 for e in self._store.values() if e.is_fresh())
-        return {"total": total, "fresh": fresh, "history": len(self.history())}
+    async def clear(self) -> None:
+        store = get_store()
+        await store.delete_prefix(_ENTRY)
+        await store.delete_prefix(_HISTORY)
 
 
 # Module-level singleton shared across the app

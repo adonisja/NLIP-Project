@@ -39,7 +39,7 @@ Install Ollama from <https://ollama.com/download>.
 5. Use `copy .env.example .env` instead of `cp`.
 
 Everything else in the quickstart is the same. Run the server with
-`poetry run uvicorn ...`, not `./start.sh`.
+`poetry run uvicorn ...` (or `./start.sh` from Git Bash).
 
 ---
 
@@ -87,8 +87,8 @@ The ranker compares text using embeddings, and tries these in order:
 2. **OpenAI `text-embedding-3-small`**, if `OPENAI_API_KEY` is set.
 3. **Keyword overlap**, which always works but scores noticeably worse.
 
-The ranker's Ollama client connects to the default local address. It does
-**not** read `OLLAMA_URL` (see [KNOWN_ISSUES.md](KNOWN_ISSUES.md)).
+Both the ranker and the Ollama provider use `OLLAMA_URL`, so a remote Ollama
+serves embeddings and generation alike.
 
 ### Authentication
 
@@ -110,8 +110,62 @@ needs thought before you deploy.
 
 Both `/query` and `/nlip/` count against these. With no login, they're the
 only thing limiting spend on a public deployment, and the daily cap is the one
-that holds even against a caller with many IP addresses. The counters live in
-memory, so they reset whenever the server restarts.
+that holds even against a caller with many IP addresses. Where the counters
+live is the next section.
+
+### Shared state (Supabase)
+
+The query cache, conversations, rate-limit counters, daily count, and geocode
+caches live in one store ([state.py](../angel_filter/state.py)):
+
+| `ANGEL_DATABASE_URL` | Where state lives | Use it for |
+|---|---|---|
+| unset (default) | This process's memory. Lost on restart, not shared between workers. | Local development and tests. Nothing to set up. |
+| a Postgres URL | Postgres. Survives restarts, shared by every worker and instance. | Any deployment, so the limits and the daily cap actually hold. |
+
+**The documented option is [Supabase](https://supabase.com)'s free tier**: a
+500 MB Postgres database, far more than this state needs. Any Postgres 12 or
+later works the same way (Neon, a paid Render database, or a local one).
+
+1. Create a free account at <https://supabase.com/dashboard> and a new project
+   in the region nearest your server. Save the database password it asks
+   for.
+2. Click **Connect** at the top of the project and copy the **Session pooler**
+   connection string. It looks like
+   `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+   Use the pooler, not the "Direct connection": direct connections need IPv6,
+   which Render and many other hosts don't have. The Transaction pooler (port
+   6543) also works.
+3. Put your password into the string. If it contains characters like `@`,
+   `/` or `#`, URL-encode them (or reset the password to letters and digits).
+4. Set it as `ANGEL_DATABASE_URL` (in `.env` locally, in the dashboard on
+   Render) and restart.
+5. Check `/health`: it should report `"state": {"backend": "postgres",
+   "reachable": true}`.
+
+The app creates its tables on first use, in a schema called `angel_state`.
+Nothing goes in `public`: Supabase serves `public` through its auto-generated
+Data API, and this state (query history, conversations) must not be readable
+with your project's public API key. Row-level security is on as well.
+
+**Free projects pause after about a week without database activity.** The
+app's searches count as activity, but a deployment nobody uses could pause.
+[.github/workflows/keepalive.yml](../.github/workflows/keepalive.yml) writes a
+heartbeat row every 3 days. To turn it on, add the same URL as a repository
+secret named `ANGEL_DATABASE_URL` (Settings → Secrets and variables →
+Actions). GitHub disables scheduled workflows in a repository with no activity
+for 60 days, so check the Actions tab now and then. If the project does pause,
+restore it from the Supabase dashboard; the app keeps running on in-process
+state meanwhile (see below).
+
+**If the database becomes unreachable** (paused, down, or a wrong URL), the
+app logs a warning and keeps running on in-process state, exactly as if
+`ANGEL_DATABASE_URL` were unset. It retries the database every 30 seconds.
+`/health` shows `"reachable": false` meanwhile.
+
+Geocoded venue coordinates expire after 30 days, because Google's Maps
+Platform terms limit how long Places content may be cached. Check the current
+terms before changing that.
 
 ---
 
@@ -173,8 +227,10 @@ match), so it gets the same versions CI tests, NLIP libraries included.
    other's, the hop count is wrong for your setup. The daily cap still
    protects you either way.
 
-The free tier sleeps when idle and wipes all in-memory state (cache,
-conversations, rate-limit counters, the daily count) each time it restarts.
+**Set `ANGEL_DATABASE_URL`** (see [Shared state](#shared-state-supabase)).
+The free tier sleeps when idle and restarts often. Without a database, each
+restart wipes the cache, the conversations, and the rate-limit and daily
+counters, which means the daily spending cap resets too.
 
 ---
 

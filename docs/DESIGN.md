@@ -41,6 +41,13 @@ Embedding backends, in order: Ollama `nomic-embed-text` (local), then OpenAI
 keyword overlap as a last resort. Ollama embedding calls run concurrently on
 the async client, so ranking N results costs about one round trip, not N.
 
+**An embedding failure never fails the search.** By the time the ranker runs,
+the providers have already been paid for. If the embedding call fails, that
+search is scored by keyword overlap, and the backend is probed again on the
+next search. A probe that finds no backend is retried after 60 seconds, so a
+backend started after the server is picked up without a restart. The Ollama
+client times out after 30 seconds.
+
 **Before you change this:** if you change the embedding model, update
 `DEFAULT_EMBED_MODEL` in `ranker.py` and the docs. Keep every call async. A
 blocking call here stalls the whole server.
@@ -219,8 +226,24 @@ A flat deduction for any result with `sponsored=True`, no matter how well it
 matches. **This is the thesis of the project.** A paid placement has to be
 clearly better than the organic alternatives to reach the top.
 
-**Current gap:** the penalty works, but no live provider ever sets
-`sponsored=True`. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md#2-no-live-result-is-ever-flagged-as-sponsored).
+### Detection
+
+No live provider reports ads, so [sponsorship.py](../angel_filter/sponsorship.py)
+infers them after the fan-out, before ranking. A result is flagged when its
+URL goes through an ad network, carries an ad-click ID or a paid UTM tag, or
+has affiliate tracking, or when its text discloses payment ("Sponsored ·",
+"paid partnership", "#ad", "we may earn a commission"). A flag a provider set
+itself is kept as it is.
+
+Every flag records a `sponsored_reason`, which travels in the API payload, the
+NLIP text reply (`[SPONSORED: ad-click tracking (gclid)]`), and the UI's
+tooltip and demotion callout. A demotion is never a bare assertion.
+
+The rules lean towards missing an ad rather than flagging an organic result,
+because a false positive undermines the claim the project makes. That's why
+"sponsored by" is not a rule: event listings use it constantly. How often
+detection fires on real searches hasn't been measured; see
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md#2-measure-and-extend-sponsored-detection).
 
 **Before you change this:** don't remove, reduce, or route around the penalty
 without the team (and your mentor) agreeing. Several other numbers are sized
@@ -316,7 +339,34 @@ go through these limits. `tests/test_limits.py` covers both routes.
 
 ### State
 
-The query cache, conversation memory, rate limiter, daily counter, and venue
-coordinate cache are all plain in-memory Python objects. That's fine for one
-process and a demo. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for what it means
-beyond that.
+The query cache, conversation memory, rate limiter, daily counter, and the
+venue and locality geocode caches all go through one async store,
+[state.py](../angel_filter/state.py). It's in-process memory by default and
+Postgres when `ANGEL_DATABASE_URL` is set (Supabase's free tier is the
+documented option). Every entry has an expiry: cache entries 3 hours,
+conversations 30 minutes after their last turn, a day's counter 2 days,
+geocodes 30 days. Postgres has no key expiry of its own, so expired rows are
+never returned, and the app deletes them every 10 minutes.
+
+- **The rate limit and daily cap are safe across workers.** A rate-limit hit
+  takes a per-key advisory lock while it counts and inserts, and the daily cap
+  increments in one statement and undoes a rejected request, so two workers
+  can't both take the last slot. A test fires 20 simultaneous requests at 4
+  workers and checks exactly 5 get through.
+- **A database outage never fails a search.** Each operation falls back to an
+  in-process store, which is the old behaviour, and retries the database after
+  30 seconds. `/health` reports `"reachable": false`. Tests switch the fallback
+  off, so a broken backend fails them instead of hiding.
+- **The tables live in their own `angel_state` schema**, with row-level
+  security on. Supabase serves the `public` schema through its Data API, and
+  query history must not be readable with a project's public API key.
+- **Venue coordinates are keyed by the user's rough area as well as the
+  title.** The lookup is biased towards the user, so "Joe's Pizza" near
+  Manhattan and near LA are different places, and a shared cache must not mix
+  them up.
+- **Conversation tokens are hashed before becoming keys**, because the client
+  chooses them.
+
+**Before you change this:** tests run on both backends. CI starts a throwaway
+Postgres and runs the suite a second time with `ANGEL_TEST_STORE=postgres`,
+and `tests/test_state.py` holds the two backends to the same behaviour.

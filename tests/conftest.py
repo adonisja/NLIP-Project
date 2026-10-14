@@ -23,34 +23,51 @@ os.environ.setdefault("OLLAMA_MODEL", "llama3.2")
 import pytest
 
 
+def reset_postgres(url: str) -> None:
+    """Empty the state tables in a test database (created on first use)."""
+    import asyncio
+
+    import asyncpg
+
+    async def run():
+        conn = await asyncpg.connect(url)
+        try:
+            await conn.execute("""
+                DO $$ BEGIN
+                  IF EXISTS (SELECT FROM pg_namespace WHERE nspname = 'angel_state') THEN
+                    TRUNCATE angel_state.kv, angel_state.hits;
+                  END IF;
+                END $$;""")
+        finally:
+            await conn.close()
+
+    asyncio.run(run())
+
+
 @pytest.fixture(autouse=True)
-def _clear_query_cache():
-    """Empty the process-wide caches and rate-limit counters around every test.
+def _fresh_state(monkeypatch):
+    """Give every test an empty state store (see angel_filter/state.py).
 
-    CACHE is module-level state shared by both transports. Once the NLIP path
-    started caching, a test whose query matched an earlier test's key was served
-    the stored payload and never reached its orchestrator spy — the assertion
-    then failed on an empty kwargs dict, passing in isolation and failing in the
-    suite. Tests must not depend on execution order, so this resets it.
+    The query cache, conversations, rate-limit counters and geocode caches all
+    live in that store. Shared across tests, a query matching an earlier test's
+    key was served the stored payload and never reached its orchestrator spy,
+    and enough requests across the suite would trip the rate limit in an
+    unrelated test. Tests must not depend on execution order.
 
-    QueryCache exposes no public clear(); /cache/clear reaches into the same two
-    attributes, so this mirrors it rather than inventing an API.
+    ANGEL_DATABASE_URL is cleared so a developer's real database is never
+    touched. With ANGEL_TEST_STORE=postgres, every test instead runs on the
+    Postgres backend against ANGEL_TEST_DATABASE_URL (a throwaway database; CI
+    uses a service container), with the in-memory fallback disabled so a
+    backend error fails the test instead of hiding.
     """
-    from angel_filter.cache import CACHE
-    from angel_filter import geocode, limits
+    from angel_filter import state
 
-    def _reset():
-        CACHE._store.clear()
-        CACHE._history.clear()
-        # The venue-coordinate and locality caches are process-wide and
-        # deliberately outlive a query, so without this a test that geocodes
-        # "Joe's Pizza" makes the next one's lookup count zero.
-        geocode._coord_cache.clear()
-        geocode._locality_cache.clear()
-        # Rate-limit counters are per process too; without this, enough
-        # requests across the suite would trip the limit in an unrelated test.
-        limits.reset_limits()
-
-    _reset()
+    monkeypatch.delenv("ANGEL_DATABASE_URL", raising=False)
+    if os.getenv("ANGEL_TEST_STORE") == "postgres":
+        url = os.environ["ANGEL_TEST_DATABASE_URL"]
+        reset_postgres(url)
+        state.use_store(state.PostgresStore(url, fallback=False))
+    else:
+        state.use_store(state.MemoryStore())
     yield
-    _reset()
+    state.use_store(None)

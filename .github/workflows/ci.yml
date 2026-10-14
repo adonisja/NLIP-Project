@@ -10,6 +10,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # A throwaway Postgres, so the Postgres state backend is tested for real.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ANGEL_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,6 +43,9 @@ jobs:
 
       - name: Run tests
         run: poetry run pytest -v
+
+      - name: Run tests on the Postgres state backend
+        run: ANGEL_TEST_STORE=postgres poetry run pytest -q
 
       # requirements.txt is what deployments install. If it drifts from
       # poetry.lock, a deploy can come up without the NLIP libraries, and the

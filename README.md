@@ -30,8 +30,9 @@ May 15, 2026. It is now being handed to new students to carry forward.
   reach your server can search, so per-client rate limits and a daily query
   cap are the only cost protection.
 - **What doesn't yet:** see [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md). Read
-  it before you start. The most important item is that **no live provider
-  flags anything as sponsored yet**, so the penalty only fires on test data.
+  it before you start. Sponsored results are detected by conservative rules
+  ([sponsorship.py](angel_filter/sponsorship.py)), and nobody has yet measured
+  how often they fire on real searches.
 
 You will be running your **own copy**: your own repository, API keys, and
 deployment. Nothing from the original team's accounts carries
@@ -199,12 +200,14 @@ Read in this order. Each file builds on the one before it.
 angel_filter/
   server.py             NLIP session, HTTP routes, fallback app, provider wiring
   orchestrator.py       parallel fan-out, then enrichment, then ranking
+  sponsorship.py        infers sponsored results (ad links, affiliate tags, disclosures)
   ranker.py             scoring: similarity + axes + agreement − sponsored
   constraints.py        pulls "$15", "1 mile", "4 stars" out of the query
   prompt.py             prompt shared by the AI providers
   geocode.py            distance: neighbourhood lookup, venue geocoding
   conversation.py       multi-turn memory, keyed by the NLIP conversation token
-  cache.py              in-memory query cache (3-hour TTL)
+  state.py              shared state: in memory, or Postgres (Supabase) when ANGEL_DATABASE_URL is set
+  cache.py              query cache (3-hour TTL)
   limits.py             per-client rate limit + daily query cap
   providers/            one file per provider, plus base.py and mock.py
 static/

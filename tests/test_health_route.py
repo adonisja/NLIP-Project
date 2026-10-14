@@ -37,13 +37,14 @@ def test_health_belongs_to_us_not_upstream():
     assert route.endpoint.__module__ == "angel_filter.server"
 
 
-def test_health_returns_the_diagnostic_payload():
+@pytest.mark.asyncio
+async def test_health_returns_the_diagnostic_payload():
     """The point of owning the route: mode, uptime, and the provider list.
 
     A bare {"status": "healthy"} passes a liveness check but cannot tell you a
     provider silently failed to configure.
     """
-    body = server._health_response(mode="nlip", nlip_available=True)
+    body = await server._health_response(mode="nlip", nlip_available=True)
     assert body["ok"] is True
     assert body["mode"] == "nlip"
     assert body["nlip_available"] is True

@@ -21,7 +21,7 @@ import logging
 import os
 import time
 
-from fastapi import Depends, FastAPI, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from angel_filter.cache import CACHE
@@ -37,6 +37,7 @@ from angel_filter.limits import enforce_query_limits, nlip_limit_middleware
 from angel_filter.constraints import QueryConstraints
 from angel_filter.orchestrator import Orchestrator
 from angel_filter.ranker import QueryIntent
+from angel_filter.state import get_store
 from angel_filter.providers import BraveProvider, GeminiProvider, GooglePlacesProvider, OllamaProvider, OpenAIProvider, WatsonXProvider
 
 logger = logging.getLogger(__name__)
@@ -157,14 +158,76 @@ def _constraints_from_payload(payload: dict) -> QueryConstraints:
     )
 
 
-def _health_response(mode: str, nlip_available: bool) -> dict:
+async def _health_response(mode: str, nlip_available: bool) -> dict:
+    store = get_store()
+    state = {"backend": store.backend}
+    if store.backend != "memory":
+        # False means state is running on the in-process fallback right now
+        # (database unreachable, or a free Supabase project has paused).
+        state["reachable"] = await store.ping()
     return {
         "ok": True,
         "mode": mode,
         "nlip_available": nlip_available,
         "uptime_seconds": round(time.time() - _START_TIME, 1),
         "providers": [p.name for p in ORCHESTRATOR.providers],
+        "state": state,
     }
+
+
+async def _run_search(**kwargs):
+    """Run one fan-out through the orchestrator, recording it in /metrics.
+
+    Every route that searches goes through here. The metrics were once
+    recorded inline in the /query handlers only, so the NLIP session — the
+    path the UI actually uses — never showed up in them at all.
+    """
+    with QUERY_LATENCY.time():
+        try:
+            response = await ORCHESTRATOR.handle_query(**kwargs)
+        except Exception:
+            QUERY_COUNT.labels(status="error").inc()
+            raise
+    QUERY_COUNT.labels(status="success").inc()
+    sponsored = sum(1 for r in response.ranked if r.result.sponsored)
+    if sponsored:
+        SPONSORED_PENALTY_COUNT.inc(sponsored)
+    return response
+
+
+async def _rest_search(body) -> dict:
+    """POST /query, shared by both server modes: cache, search, serialise.
+
+    The two /query handlers were separate copies and had drifted: only the
+    fallback one used the cache, so in NLIP mode every REST call paid for a
+    fresh fan-out. `body` is the mode's QueryIn model.
+    """
+    # Fold location into the cache's preference component so two users at
+    # different coordinates don't get served each other's distance results.
+    cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
+    cached = await CACHE.get(body.query, cache_pref)
+    if cached:
+        logger.info("Cache hit for query: %r", body.query)
+        return cached
+
+    try:
+        response = await _run_search(
+            user_query=body.query,
+            user_preference=body.preference,
+            user_lat=body.lat,
+            user_lng=body.lng,
+            intent=_parse_priority(body.priority),
+        )
+    except Exception as exc:
+        logger.exception("Query failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})",
+        )
+
+    payload = {**_serialize_response(response), "cached": False}
+    await CACHE.set(body.query, cache_pref, {**payload, "cached": True})
+    return payload
 
 
 # --- NLIP integration ---------------------------------------------------------
@@ -227,7 +290,7 @@ if _NLIP_AVAILABLE:
             # object per request — so it is keyed by that token in CONVERSATIONS.
             token = msg.extract_conversation_token()
             turn_mode = _extract_turn_mode(msg)
-            conversation = CONVERSATIONS.get(token)
+            conversation = await CONVERSATIONS.get(token)
             previous = conversation.latest if conversation else None
 
             # An explicit "new" ends the thread outright: the user told us this
@@ -280,10 +343,16 @@ if _NLIP_AVAILABLE:
             )
             if refinement is not None:
                 cache_pref = f"{cache_pref}|r={refinement.budget},{refinement.max_distance},{refinement.min_rating}"
+            # Likewise a follow-up answered with prior turns in the prompt: "what
+            # about vegetarian options" means something different in every
+            # conversation. Without this, one conversation's answer was served
+            # to another that shared the same wording and location.
+            if context_prefix:
+                cache_pref = f"{cache_pref}|ctx={context_prefix}"
 
-            payload = CACHE.get(search_query, cache_pref)
+            payload = await CACHE.get(search_query, cache_pref)
             if payload is None:
-                response = await ORCHESTRATOR.handle_query(
+                response = await _run_search(
                     user_query=search_query,
                     user_preference=preference,
                     user_lat=user_lat,
@@ -293,7 +362,7 @@ if _NLIP_AVAILABLE:
                     context_prefix=context_prefix,
                 )
                 payload = _serialize_response(response)
-                CACHE.set(search_query, cache_pref, {**payload, "cached": True})
+                await CACHE.set(search_query, cache_pref, {**payload, "cached": True})
                 summary = _format_reply(response)
             else:
                 logger.info("Cache hit for NLIP query: %r", search_query)
@@ -307,7 +376,7 @@ if _NLIP_AVAILABLE:
             # Remember this turn so the *next* follow-up has an anchor. The top
             # result's actual values are what "cheaper than that" refers to.
             top = (payload.get("results") or [None])[0]
-            CONVERSATIONS.record(token, Turn(
+            await CONVERSATIONS.record(token, Turn(
                 query=search_query,
                 constraints=refinement or _constraints_from_payload(payload),
                 top_title=top.get("title") if top else None,
@@ -386,27 +455,11 @@ if _NLIP_AVAILABLE:
 
     @app.get("/health")
     async def health():
-        return _health_response(mode="nlip", nlip_available=True)
+        return await _health_response(mode="nlip", nlip_available=True)
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
-        with QUERY_LATENCY.time():
-            try:
-                response = await ORCHESTRATOR.handle_query(
-                    user_query=body.query,
-                    user_preference=body.preference,
-                    user_lat=body.lat,
-                    user_lng=body.lng,
-                    intent=_parse_priority(body.priority),
-                )
-                QUERY_COUNT.labels(status="success").inc()
-                for r in response.ranked:
-                    if r.result.sponsored:
-                        SPONSORED_PENALTY_COUNT.inc()
-            except Exception:
-                QUERY_COUNT.labels(status="error").inc()
-                raise
-        return _serialize_response(response)
+        return await _rest_search(body)
 
     # With no login, these are open to anyone who can reach the server:
     # /history shows every caller's recent queries and /cache/clear wipes the
@@ -414,12 +467,11 @@ if _NLIP_AVAILABLE:
     # in docs/KNOWN_ISSUES.md.
     @app.get("/history")
     async def history():
-        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+        return {"queries": await CACHE.history(), "cache_stats": await CACHE.stats()}
 
     @app.post("/cache/clear")
     async def cache_clear():
-        CACHE._store.clear()
-        CACHE._history.clear()
+        await CACHE.clear()
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
@@ -466,55 +518,19 @@ else:
 
     @app.get("/health")
     async def health():
-        return _health_response(mode="fallback", nlip_available=False)
+        return await _health_response(mode="fallback", nlip_available=False)
 
     @app.post("/query")
     async def query(body: QueryIn, _client: str = Depends(enforce_query_limits)):
-        from fastapi import HTTPException as _HTTPException
-
-        # Fold location into the cache's preference component so two users at
-        # different coordinates don't get served each other's distance results.
-        cache_pref = _cache_pref(body.preference, body.lat, body.lng, body.priority)
-
-        # Return cached result if fresh
-        cached = CACHE.get(body.query, cache_pref)
-        if cached:
-            logger.info("Cache hit for query: %r", body.query)
-            return cached
-
-        with QUERY_LATENCY.time():
-            try:
-                response = await ORCHESTRATOR.handle_query(
-                    user_query=body.query,
-                    user_preference=body.preference,
-                    user_lat=body.lat,
-                    user_lng=body.lng,
-                    intent=_parse_priority(body.priority),
-                )
-                QUERY_COUNT.labels(status="success").inc()
-                for r in response.ranked:
-                    if r.result.sponsored:
-                        SPONSORED_PENALTY_COUNT.inc()
-            except Exception as exc:
-                QUERY_COUNT.labels(status="error").inc()
-                logger.exception("Query failed: %s", exc)
-                raise _HTTPException(
-                    status_code=503,
-                    detail=f"Query failed — providers may be temporarily unavailable. Please try again. ({type(exc).__name__})"
-                )
-
-        payload = {**_serialize_response(response), "cached": False}
-        CACHE.set(body.query, cache_pref, {**payload, "cached": True})
-        return payload
+        return await _rest_search(body)
 
     @app.get("/history")
     async def history():
-        return {"queries": CACHE.history(), "cache_stats": CACHE.stats()}
+        return {"queries": await CACHE.history(), "cache_stats": await CACHE.stats()}
 
     @app.post("/cache/clear")
     async def cache_clear():
-        CACHE._store.clear()
-        CACHE._history.clear()
+        await CACHE.clear()
         return {"ok": True, "message": "Cache cleared."}
 
     @app.get("/metrics")
@@ -654,6 +670,7 @@ def _serialize_response(response) -> dict:
                 "score": round(r.score, 3),
                 "rationale": r.rationale,
                 "sponsored": r.result.sponsored,
+                "sponsored_reason": r.result.sponsored_reason,
                 "consensus_count": r.consensus_count,
                 # The raw values behind the axis scores. A follow-up like
                 # "cheaper than that" has to anchor on what the top result
@@ -731,7 +748,10 @@ def _format_reply_from_payload(payload: dict) -> str:
         return "No results from any provider. Providers tried: " + ", ".join(used + failed)
     lines = [f"Ranked {len(results)} results (providers used: {', '.join(used)}):"]
     for i, r in enumerate(results, start=1):
-        tag = " [SPONSORED]" if r.get("sponsored") else ""
+        tag = ""
+        if r.get("sponsored"):
+            reason = r.get("sponsored_reason")
+            tag = f" [SPONSORED: {reason}]" if reason else " [SPONSORED]"
         lines.append(f"{i}. {r.get('title')}{tag} — {r.get('provider')} — {r.get('rationale')}")
         if r.get("url"):
             lines.append(f"   {r['url']}")
@@ -747,5 +767,5 @@ def _format_reply(response) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8005"))
     uvicorn.run(app, host="0.0.0.0", port=port)
