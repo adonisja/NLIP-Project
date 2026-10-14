@@ -41,6 +41,13 @@ Embedding backends, in order: Ollama `nomic-embed-text` (local), then OpenAI
 keyword overlap as a last resort. Ollama embedding calls run concurrently on
 the async client, so ranking N results costs about one round trip, not N.
 
+**An embedding failure never fails the search.** By the time the ranker runs,
+the providers have already been paid for. If the embedding call fails, that
+search is scored by keyword overlap, and the backend is probed again on the
+next search. A probe that finds no backend is retried after 60 seconds, so a
+backend started after the server is picked up without a restart. The Ollama
+client times out after 30 seconds.
+
 **Before you change this:** if you change the embedding model, update
 `DEFAULT_EMBED_MODEL` in `ranker.py` and the docs. Keep every call async. A
 blocking call here stalls the whole server.

@@ -106,7 +106,7 @@ repeat queries.
 ## 4. The ranker's Ollama client ignores `OLLAMA_URL`
 
 The Ollama *provider* reads `OLLAMA_URL`, but the *ranker's* embedding client
-(`Ranker._ollama` in `ranker.py`) calls `ollama.AsyncClient()` with no host,
+(`Ranker._ollama` in `ranker.py`) creates `ollama.AsyncClient` with no host,
 so embeddings always go to `localhost:11434` (or the `ollama` library's own
 `OLLAMA_HOST` variable). Pass the configured URL through so a remote Ollama
 works for both.
