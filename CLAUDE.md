@@ -2,19 +2,24 @@
 
 ## What this project is
 
-A Python/FastAPI proxy agent that queries multiple AI/search providers in
-parallel, ranks their responses against user preferences using a local LLM
-via Ollama, and penalizes sponsored results. CUNY capstone project.
+A Python/FastAPI proxy that sends a query to several AI and search providers
+in parallel, ranks the combined results against the user's constraints and
+preferences, and penalizes sponsored results. It speaks NLIP. It began as a
+CUNY capstone (spring 2026) and has been handed to new maintainers; the
+original author (@adonisja) is their mentor.
 
-Read `README.md` for the full architecture and current status table.
+- `README.md`: overview, architecture diagram, quickstart, reading order
+- `docs/DESIGN.md`: how scoring works and why. Read it before touching `ranker.py`.
+- `docs/KNOWN_ISSUES.md`: unfinished work
+- `CONTRIBUTING.md`: workflow and conventions
 
 ## Tech stack
 
-- Python 3.10+, Poetry for dependency management
-- FastAPI for the server (via `nlip_server`, which wraps FastAPI)
-- `nlip_sdk`, `nlip_server`, and reference `nlip_web` from github.com/nlip-project
-- Ollama for local embeddings (`nomic-embed-text` default)
-- Pytest + pytest-asyncio for tests
+- Python 3.12, Poetry (the only supported install; it fetches the NLIP libraries)
+- FastAPI, via `nlip_server`, which wraps it
+- `nlip_sdk` and `nlip_server` from github.com/nlip-project
+- Ollama for local embeddings (`nomic-embed-text`) and as a provider
+- Pytest + pytest-asyncio
 
 ## Code conventions
 
@@ -22,63 +27,64 @@ Read `README.md` for the full architecture and current status table.
   that reference their own types.
 - Async-first: every provider's `query()` and every orchestrator path is
   async. Do not introduce blocking I/O into these paths.
-- No hardcoded secrets. If a provider needs an API key, read it from env.
+- No hardcoded secrets. Read keys from env and document new variables in
+  `.env.example` and `docs/SETUP.md`.
 - Prefer lazy imports for optional heavy dependencies (see how `ollama` and
-  `httpx` are imported inside functions rather than at module top).
-- Keep the fallback FastAPI server in `server.py` working — it's our demo
-  insurance if the NLIP libraries fail to install.
+  `httpx` are imported inside functions).
+- Both branches of `server.py` (NLIP and fallback FastAPI) must expose the
+  same routes; `tests/test_route_parity.py` enforces it.
+- There is no login (see `docs/KNOWN_ISSUES.md` §1). `limits.py` is the only
+  cost protection: any new route that triggers provider calls must go through
+  `enforce_query_limits` (or the NLIP middleware) and have a test proving it.
 
 ## When adding a new provider
 
-1. Create `angel_filter/providers/<name>.py`.
-2. Subclass `BaseProvider`, set `name`, implement `query()`.
-3. Normalize the provider's native response into `ProviderResult` objects —
-   never leak provider-specific shapes past this boundary.
-4. Raise `ProviderError` on recoverable failures; the orchestrator handles it.
-5. Register the new provider in `_build_orchestrator()` in `server.py`.
-6. Add a test in `tests/` that uses canned responses (not the live API).
+1. Create `angel_filter/providers/<name>.py`, subclass `BaseProvider`, set
+   `name`, implement `async query()`.
+2. Normalize into `ProviderResult`; never leak provider-specific shapes. Leave
+   fields `None` when the provider doesn't really know them. Never invent a
+   price, distance, or rating.
+3. Raise `ProviderError` on recoverable failures.
+4. Export from `providers/__init__.py`; register in `_build_orchestrator()` in
+   `server.py` behind an env-variable check.
+5. Add a test with canned responses.
 
-Use `providers/duckduckgo.py` as the reference implementation.
+Reference implementations: `providers/brave.py` (search API),
+`providers/openai_provider.py` (LLM).
 
 ## When changing the ranker
 
-The ranker's scoring formula is:
+    score = 0.50 × similarity + 0.35 × axis_score + 0.15 × consensus − (0.20 if sponsored)
 
-    final_score = cosine_similarity(user_pref, result_text) - (SPONSORED_PENALTY if sponsored else 0)
+All in `_assemble_score` in `ranker.py`. The weights sum to 1.0; keep it so.
 
-The sponsored penalty is the **thesis of the project** — do not remove or
-bypass it without discussion. If you change the embedding model, update
-`DEFAULT_EMBED_MODEL` in `ranker.py` and update the README.
-
-## Team ownership (per project plan)
-
-- Software: me, Teammate I (NLIP layer), Teammate J (providers + frontend)
-- Prompt engineering: Teammate My, Teammate E
-- UX: Teammate Ma
-- PM: Teammate P
-
-When I ask you to implement prompt logic or UI, flag that those live in
-other owners' lanes and suggest we scope the change accordingly.
+The sponsored penalty is the **thesis of the project**. Do not remove, reduce,
+or bypass it without discussion. The missing-data rules in `_axis_bonus` are
+deliberate (see `docs/DESIGN.md` §4); if `test_axis_scoring.py` fails after a
+change, the change is probably wrong. If you change the embedding model,
+update `DEFAULT_EMBED_MODEL` and the docs.
 
 ## Testing
 
 Run: `poetry run pytest`
 
-Tests must not require live network or Ollama. Use `MockProvider` and set
-`ranker._ollama_available = False` for deterministic runs.
+Tests must not require live network, API keys, or Ollama. Use `MockProvider`
+or canned responses, and set `ranker._ollama_available = False` for
+deterministic runs.
+
+## Running
+
+    poetry run uvicorn angel_filter.server:app --reload --port 8005
+
+Port 8005 is the convention throughout the docs.
 
 ## What NOT to do
 
-- Do not delete the fallback FastAPI path in `server.py` yet. It goes once
-  `poetry install` is reliable across all teammates' machines.
-- Do not add new top-level dependencies without updating `pyproject.toml`
-  AND the README's setup section.
+- Do not add dependencies without `poetry add` (updating `pyproject.toml`)
+  and a note in `docs/SETUP.md`.
 - Do not write scraping code for Google/Bing without checking their ToS
   first and raising the question in the PR description.
-- Do not modify the NLIP protocol expectations — our job is to use the
-  upstream libraries, not fork them.
-
-## Deadlines
-
-- May 1: integrated version ready (Dinesh returns)
-- May 15: final demo to 15-org audience
+- Do not modify or fork the NLIP libraries — use them as published; override
+  on our side if needed (see the `/health` fix in `docs/DESIGN.md`).
+- Do not delete the fallback FastAPI path without team agreement (see
+  `docs/KNOWN_ISSUES.md`).

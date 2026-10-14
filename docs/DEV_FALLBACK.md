@@ -1,68 +1,55 @@
-# Dev Fallback Mode
+# Fallback mode
 
-`angel_filter/server.py` tries to import the NLIP libraries at startup:
+At startup, [angel_filter/server.py](../angel_filter/server.py) tries to
+import the NLIP libraries:
 
 ```python
-from nlip_server.server import NLIPApplication, NLIPSession, start_server
-from nlip_sdk import nlip
+from nlip_server.server import NLIP_Application, NLIP_Session, setup_server
+from nlip_sdk.nlip import NLIP_Factory, NLIP_Message
 ```
 
-If either import fails — most commonly because `poetry install` hasn't
-resolved the Git-based NLIP dependencies on a teammate's machine yet — the
-module logs a warning and falls back to a plain FastAPI app. This is
-intentional: we don't want Friday's demo (or anyone's first five minutes with
-the repo) gated on a dependency install problem.
+If that fails, usually because dependencies were installed piecemeal with
+`pip` instead of through `poetry install` or `requirements.txt`, it logs a
+warning and builds a plain FastAPI app instead.
+`/health` then reports `"mode": "fallback"`.
 
-## What the fallback exposes
+## What's different
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/` | GET | Serves `static/index.html`, the demo UI |
-| `/query` | POST | Runs the full pipeline: fan out → rank → return JSON |
-| `/health` | GET | Returns `{ok: true, mode: "fallback", nlip_available: false}` |
+Both modes run the same pipeline and expose the same routes (`/`,
+`/health`, `/metrics`, `/history`, `/cache/clear`, `/query`).
+`tests/test_route_parity.py` keeps them in sync. The only difference is that fallback mode has **no `/nlip/` endpoint**. That matters
+more than it sounds: the demo UI sends every search to `/nlip/`, so **the UI
+can't search in fallback mode**. Only direct `POST /query` calls (curl,
+Swagger at `/docs`) work, and there are no multi-turn follow-ups.
 
-### POST /query
+## POST /query
 
-**Request body** (`application/json`):
-```json
-{ "query": "cheapest 30-pack toilet paper", "preference": "low price not premium brand" }
-```
+Counts against the rate limits and the daily cap (see [SETUP.md](SETUP.md#limits-and-cost-controls)).
 
-`preference` is optional. If omitted, results are ranked against the `query`
-text itself.
-
-**Response body**:
 ```json
 {
-  "providers_used": ["duckduckgo", "mock"],
-  "providers_failed": [],
-  "results": [
-    {
-      "title": "...",
-      "snippet": "...",
-      "url": "...",
-      "provider": "mock",
-      "score": 0.73,
-      "rationale": "strong match (similarity 0.88) — sponsored, penalty 0.15 applied",
-      "sponsored": true
-    }
-  ]
+  "query": "lunch under $15 within 1 mile",
+  "preference": "quiet, vegetarian options",
+  "lat": 40.7359,
+  "lng": -73.9911,
+  "priority": "price"
 }
 ```
 
-## Why keep this mode in production code
+Only `query` is required. `preference` is what similarity is measured against
+(it defaults to the query). `lat`/`lng` enable distance scoring. `priority`
+(`"price"`, `"distance"`, `"rating"`) overrides the guessed intent; leave it
+out for auto.
 
-Once every teammate has NLIP reliably installed we can delete the fallback
-path. Until then it serves three purposes:
+The response carries the same ranking payload as the JSON submessage in an
+NLIP reply: `providers_used`, `providers_failed`, the parsed `constraints`,
+and `results`. Each result has its `score`, `axis_scores` / `axis_scored`,
+`sponsored` flag, and a `rationale`. `/docs` (Swagger) shows the exact shape.
 
-1. **New-contributor onboarding** — `git clone` + `pip install fastapi httpx
-   pydantic uvicorn` + `uvicorn angel_filter.server:app` is enough to see
-   something work.
-2. **Demo insurance** — if the NLIP libraries break upstream the day before
-   our demo, we don't panic.
-3. **Frontend development** — the UX owner can iterate on `static/index.html`
-   without needing any of the NLIP or Ollama setup.
+## Should it stay?
 
-Once `nlip_sdk` and `nlip_server` stabilize (tracking their `main` branches
-is a known risk), plan is to pin them to a release tag in `pyproject.toml`
-and remove the fallback.
+It was kept as insurance while NLIP installs were unreliable. NLIP now
+installs cleanly through Poetry and in deployments (`requirements.txt` is
+generated from `poetry.lock`, and CI checks that a pip install runs in NLIP
+mode). Since the UI moved to `/nlip/`, the fallback can't keep the demo
+working on its own anyway. Removing it is a reasonable team decision.
